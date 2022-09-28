@@ -37,6 +37,11 @@ class ConvNeXtTiny(BaseModel):
                 'name': 'mse',
                 'weight': 1,
                 'f': lambda p, t: F.mse_loss(p, t[1])
+            },
+            {
+                'name': 'seg',
+                'weight': 1,
+                'f': self.segmentation_loss
             }
         ]
 
@@ -61,6 +66,31 @@ class ConvNeXtTiny(BaseModel):
                     ', '.join([vf['name'] for vf in self.val_functions])
                 )
             )
+
+    def segmentation_loss(self, pred, target, x_size=540, y_size=800):
+        target_seg = target[0].float()
+        half_x = x_size / 2
+        half_y = y_size / 2
+        norm_a = pred[:, 0]
+        norm_b = pred[:, 1]
+        norm_x0 = pred[:, 2]
+        norm_y0 = pred[:, 3]
+        theta = pred[:, 4]
+        a = norm_a * half_x + half_x
+        b = norm_b * half_y + half_y
+        x0 = norm_x0 * half_x + half_x
+        y0 = norm_y0 * half_y + half_y
+        A = a ** 2 * torch.sin(theta) ** 2 + b ** 2 * torch.cos(theta) ** 2
+        B = 2 * (b ** 2 - a ** 2) * torch.sin(theta) * torch.cos(theta) ** 2
+        C = a ** 2 * torch.cos(theta) ** 2 + b ** 2 * torch.sin(theta) ** 2
+        D = -2 * A * x0 - B * y0
+        E = -2 * C * y0 - B * x0
+        F = A * x0 ** 2 + B * x0 * y0 + C * y0 ** 2 - a ** 2 * b ** 2
+
+        x, y = torch.meshgrid(range(y_size), range(x_size))
+        values = A * x * x + B * x * y + C * y * y + D * x + E * y + F
+
+        return F.binary_cross_entropy(values.float(), target_seg)
 
     def forward(self, data):
         self.cnext.to(self.device)
