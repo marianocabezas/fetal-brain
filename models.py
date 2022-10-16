@@ -1,4 +1,5 @@
 from torchvision import models
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -36,7 +37,7 @@ class ConvNeXtTiny(BaseModel):
             {
                 'name': 'mse',
                 'weight': 1,
-                'f': lambda p, t: F.mse_loss(p, t[1])
+                'f': lambda p, t: F.mse_loss(p, t[2])
             },
             {
                 'name': 'seg',
@@ -47,10 +48,15 @@ class ConvNeXtTiny(BaseModel):
 
         self.val_functions = [
             {
-                'name': 'xent',
+                'name': 'mse',
                 'weight': 1,
-                'f': lambda p, t: F.mse_loss(p, t[1])
+                'f': lambda p, t: F.mse_loss(p, t[2])
             },
+            {
+                'name': 'seg',
+                'weight': 1,
+                'f': self.segmentation_loss
+            }
         ]
 
         # <Optimizer setup>
@@ -68,33 +74,52 @@ class ConvNeXtTiny(BaseModel):
             )
 
     def segmentation_loss(self, pred, target, x_size=540, y_size=800):
-        target_seg = target[0].float()
+        target_seg = 1 - target[0].float().squeeze(1)
         half_x = x_size / 2
         half_y = y_size / 2
-        norm_a = pred[:, 0]
-        norm_b = pred[:, 1]
-        norm_x0 = pred[:, 2]
-        norm_y0 = pred[:, 3]
-        theta = pred[:, 4]
+        norm_a = (pred[:, 0]).view(-1, 1, 1)
+        norm_b = (pred[:, 1]).view(-1, 1, 1)
+        norm_x0 = (pred[:, 2]).view(-1, 1, 1)
+        norm_y0 = (pred[:, 3]).view(-1, 1, 1)
+        theta = (pred[:, 4]).view(-1, 1, 1)
+
         a = norm_a * half_x + half_x
         b = norm_b * half_y + half_y
         x0 = norm_x0 * half_x + half_x
         y0 = norm_y0 * half_y + half_y
-        A = a ** 2 * torch.sin(theta) ** 2 + b ** 2 * torch.cos(theta) ** 2
-        B = 2 * (b ** 2 - a ** 2) * torch.sin(theta) * torch.cos(theta) ** 2
-        C = a ** 2 * torch.cos(theta) ** 2 + b ** 2 * torch.sin(theta) ** 2
-        D = -2 * A * x0 - B * y0
-        E = -2 * C * y0 - B * x0
-        F = A * x0 ** 2 + B * x0 * y0 + C * y0 ** 2 - a ** 2 * b ** 2
 
-        x, y = torch.meshgrid(range(y_size), range(x_size))
-        values = A * x * x + B * x * y + C * y * y + D * x + E * y + F
+        Ap = a ** 2 * torch.sin(theta) ** 2 + b ** 2 * torch.cos(theta) ** 2
+        Bp = 2 * (b ** 2 - a ** 2) * torch.sin(theta) * torch.cos(theta) ** 2
+        Cp = a ** 2 * torch.cos(theta) ** 2 + b ** 2 * torch.sin(theta) ** 2
+        Dp = -2 * Ap * x0 - Bp * y0
+        Ep = -2 * Cp * y0 - Bp * x0
+        Fp = Ap * x0 ** 2 + Bp * x0 * y0 + Cp * y0 ** 2 - a ** 2 * b ** 2
 
-        return F.binary_cross_entropy(values.float(), target_seg)
+        x, y = torch.meshgrid(
+            torch.arange(end=x_size), torch.arange(end=y_size),
+            indexing='ij'
+        )
+        x = torch.repeat_interleave(
+            x.unsqueeze(dim=0), len(pred), dim=0
+        ).to(self.device)
+        y = torch.repeat_interleave(
+            y.unsqueeze(dim=0), len(pred), dim=0
+        ).to(self.device)
+
+        values = Ap * x * x + Bp * x * y + Cp * y * y + Dp * x + Ep * y + Fp
+        abs_values = torch.abs(values) * 10
+        # max_values, _ = torch.max(abs_values, dim=0, keepdim=True)
+        # norm_values = abs_values / max_values
+        norm_values = abs_values / torch.sqrt(1 + abs_values * abs_values)
+
+        return F.binary_cross_entropy(norm_values, target_seg)
 
     def forward(self, data):
         self.cnext.to(self.device)
-        return self.cnext(data)
+        params = self.cnext(data)
+        coords = torch.clamp(params[:, :-1], -1, 1)
+        theta = torch.clamp(params[:, -1:], - np.pi / 2, np.pi / 2)
+        return torch.cat([coords, theta], dim=-1)
 
 
 class SimpleUNet(BaseModel):

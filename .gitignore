@@ -9,6 +9,10 @@ __pycache__/
 # Distribution / packaging
 .Python
 training_set/
+testing_set/
+atlas_samples/
+atlas/
+models/
 env/
 build/
 develop-eggs/
