@@ -112,7 +112,9 @@ Ellipse functions
 """
 
 
-def warp_image_ellipse(image, theta, height, width, a, b, center_x, center_y):
+def warp_image_ellipse(
+    image, theta, height, width, a, b, center_x, center_y, flip=False
+):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     half_x = width / 2
     half_y = height / 2
@@ -142,10 +144,14 @@ def warp_image_ellipse(image, theta, height, width, a, b, center_x, center_y):
     ], dim=-1).unsqueeze(0)
 
     registered_image = func.grid_sample(
-        image_tensor.to(grid_tensor.device), grid_tensor
+        image_tensor.to(grid_tensor.device), grid_tensor,
+        align_corners=True
     )
+    final_image = registered_image.view(height, width)
+    if flip:
+        final_image = final_image[::-1, :].clone()
 
-    return registered_image.view(height, width)
+    return final_image
 
 
 def rotate_points(x, y, theta):
@@ -168,12 +174,18 @@ def rotate_points_origin(x, y, theta, center_x, center_y):
     return warped_x, warped_y
 
 
-def warp_points_ellipse(x, y, theta, center_x, center_y, half_x, half_y, a, b):
+def warp_points_ellipse(
+    x, y, theta, center_x, center_y, half_x, half_y, a, b, flip=False
+):
     ratio_x = half_x / a
     ratio_y = half_y / b
     rot_x, rot_y = rotate_points_origin(x, y, theta, center_x, center_y)
+    new_x = ratio_x * (rot_x + a)
+    new_y = ratio_y * (rot_y + b)
+    if flip:
+        new_y = half_y * 2 - new_y
 
-    return ratio_x * (rot_x + a), ratio_y * (rot_y + b)
+    return new_x, new_y
 
 
 def robust_fit_ellipse(mask, n_iter=100, multiloop=5, lr=1):
@@ -216,7 +228,11 @@ def robust_fit_ellipse(mask, n_iter=100, multiloop=5, lr=1):
         dist = torch.abs(
             A * (x ** 2) + B * x * y + C * (y ** 2) + D * x + E * y + F
         ).detach().cpu().numpy()
-        point_mask = (dist < (np.mean(dist) + 3 * np.std(dist)))
+        mean_out_dist = np.mean(dist[dist > 0])
+        std_out_dist = np.std(dist[dist > 0])
+        threshold = mean_out_dist + std_out_dist
+        point_mask = (dist < threshold)
+
         if np.sum(point_mask) > len(points[0]) / 2:
             idx = np.argsort(np.argsort(dist))
             point_mask = (idx + 1) < len(points[0]) / 2
