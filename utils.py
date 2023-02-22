@@ -152,6 +152,7 @@ def warp_image_ellipse(
     affine = get_affine_matrix(
         theta, height, width, a, b, center_x, center_y, device
     )
+    print(affine)
     final_image = resample(image, image, affine)
     if flip:
         final_image = final_image[::-1, :].clone()
