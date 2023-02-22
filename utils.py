@@ -202,7 +202,8 @@ def get_affine_matrix(
         ], requires_grad=True, dtype=torch.float32, device=device
     )
 
-    return ellipse_affine @ to_center
+    # return ellipse_affine @ to_center
+    return to_center
 
 
 def rotate_points(x, y, theta):
