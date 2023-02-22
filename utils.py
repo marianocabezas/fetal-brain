@@ -187,8 +187,8 @@ def get_affine_matrix(
 
     sx = 4 * a / width
     sy = 4 * b / height
-    tx = (2 * center_x - width) / (2 * width)
-    ty = (2 * center_y - height) / (2 * height)
+    tx = (center_x - width) / (2 * width)
+    ty = (center_y - height) / (2 * height)
 
     ellipse_affine = torch.tensor(
         [
