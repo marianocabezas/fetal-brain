@@ -185,8 +185,8 @@ def get_affine_matrix(
         fixed_tensor
     ], dim=0)
 
-    sx = 4 * a / width ** 2
-    sy = 4 * b / height ** 2
+    sx = 4 * a / width
+    sy = 4 * b / height
     tx = (2 * center_x - width) / (2 * width)
     ty = (2 * center_y - height) / (2 * height)
 
