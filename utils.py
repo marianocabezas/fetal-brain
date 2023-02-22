@@ -2,7 +2,7 @@ import cv2
 import torch
 import numpy as np
 from gimpformats.gimpXcfDocument import GimpDocument
-from scipy.ndimage import binary_erosion, binary_dilation
+from scipy.ndimage import binary_dilation
 from skimage.morphology import skeletonize
 import torch.nn.functional as func
 from matplotlib.image import imread
@@ -113,45 +113,91 @@ Ellipse functions
 
 
 def warp_image_ellipse(
-    image, theta, height, width, a, b, center_x, center_y, flip=False
+    image, theta, height, width, a, b, center_x, center_y, flip=False,
+    device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 ):
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    half_x = width / 2
-    half_y = height / 2
-    theta = torch.tensor(theta, device=device, requires_grad=True)
-    x = torch.arange(start=0, end=width, step=1)
-    y = torch.arange(start=0, end=height, step=1)
-    grid_x, grid_y = torch.meshgrid(x, y, indexing='xy')
-    new_x, new_y = rotate_points_origin(
-        grid_x, grid_y, theta, center_x, center_y
+    # half_x = width / 2
+    # half_y = height / 2
+    # theta = torch.tensor(theta, device=device, requires_grad=True)
+    # x = torch.arange(start=0, end=width, step=1)
+    # y = torch.arange(start=0, end=height, step=1)
+    # grid_x, grid_y = torch.meshgrid(x, y, indexing='xy')
+    # new_x, new_y = rotate_points_origin(
+    #     grid_x, grid_y, theta, center_x, center_y
+    # )
+    # offset_x = center_x - half_x
+    # offset_y = center_y - half_y
+    # ratio_x = a / half_x
+    # ratio_y = b / half_y
+    #
+    # rot_offset_x, rot_offset_y = rotate_points(
+    #     torch.tensor(offset_x), torch.tensor(offset_y), theta
+    # )
+    #
+    # offset_x += ratio_x * rot_offset_x
+    # offset_y += ratio_y * rot_offset_y
+    #
+    # image_tensor = torch.from_numpy(image).float().view(1, 1, height, width)
+    # grid_tensor = torch.stack([
+    #     2 * (ratio_x * new_x.float().to(device) + offset_x) / width,
+    #     2 * (ratio_y * new_y.float().to(device) + offset_y) / height
+    # ], dim=-1).unsqueeze(0)
+    #
+    # registered_image = func.grid_sample(
+    #     image_tensor.to(grid_tensor.device), grid_tensor,
+    #     align_corners=True
+    # )
+    #
+    # final_image = registered_image.view(height, width)
+    affine = get_affine_matrix(
+        theta, height, width, a, b, center_x, center_y, device
     )
-    offset_x = center_x - half_x
-    offset_y = center_y - half_y
-    ratio_x = a / half_x
-    ratio_y = b / half_y
-
-    rot_offset_x, rot_offset_y = rotate_points(
-        torch.tensor(offset_x), torch.tensor(offset_y), theta
-    )
-
-    offset_x += ratio_x * rot_offset_x
-    offset_y += ratio_y * rot_offset_y
-
-    image_tensor = torch.from_numpy(image).float().view(1, 1, height, width)
-    grid_tensor = torch.stack([
-        2 * (ratio_x * new_x.float().to(device) + offset_x) / width,
-        2 * (ratio_y * new_y.float().to(device) + offset_y) / height
-    ], dim=-1).unsqueeze(0)
-
-    registered_image = func.grid_sample(
-        image_tensor.to(grid_tensor.device), grid_tensor,
-        align_corners=True
-    )
-    final_image = registered_image.view(height, width)
+    final_image = resample(image, image, affine)
     if flip:
         final_image = final_image[::-1, :].clone()
 
     return final_image
+
+
+def get_affine_matrix(
+    theta, height, width, a, b, center_x, center_y,
+    device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+):
+    # Init
+    translation_tensor = torch.tensor(
+        [[-center_x], [-center_y]], requires_grad=True,
+        dtype=torch.float32, device=device
+    )
+    identity_tensor = torch.tensor(
+        np.eye(2), requires_grad=True, dtype=torch.float32, device=device
+    )
+    fixed_tensor = torch.cat([
+        torch.zeros(
+            (1, 2), requires_grad=True, dtype=torch.float32, device=device
+        ),
+        torch.ones(
+            (1, 1), requires_grad=True, dtype=torch.float32, device=device
+        )
+    ], dim=1)
+    to_center = torch.cat([
+        torch.cat([identity_tensor, translation_tensor], dim=1),
+        fixed_tensor
+    ], dim=0)
+
+    sx = 4 * a / width ** 2
+    sy = 4 * b / height ** 2
+    tx = (2 * center_x - width) / (2 * width)
+    ty = (2 * center_y - height) / (2 * height)
+
+    ellipse_affine = torch.tensor(
+        [
+            [sx * np.cos(theta), - sx * np.sin(theta), tx],
+            [sy * np.sin(theta), - sy * np.cos(theta), ty],
+            [0, 0, 1],
+        ], requires_grad=True, dtype=torch.float32, device=device
+    )
+
+    return ellipse_affine @ to_center
 
 
 def rotate_points(x, y, theta):
@@ -327,3 +373,150 @@ def ellipse_parameters(a, b, theta, x0, y0):
     F = A * x0_2 + B * x0 * y0 + C * y0_2 - a_2 * b_2
 
     return A, B, C, D, E, F
+
+
+"""
+Registration functions
+"""
+
+
+def xcor_loss(fixed, moved, mask=None):
+    if mask is None:
+        fixed_norm = fixed - torch.mean(fixed)
+        moved_norm = moved - torch.mean(moved)
+    else:
+        valid_fixed = fixed[mask]
+        valid_moved = moved[mask]
+        fixed_norm = valid_fixed - torch.mean(valid_fixed)
+        moved_norm = valid_moved - torch.mean(valid_moved)
+    fixed_sq = torch.sum(fixed_norm ** 2)
+    moved_sq = torch.sum(moved_norm ** 2)
+
+    den = torch.sqrt(fixed_sq * moved_sq)
+    num = torch.sum(fixed_norm * moved_norm)
+
+    xcor = num / den if den > 0 else 0
+
+    return 1. - xcor
+
+
+def xcor_patch_loss(fixed, moved, mask=None, k=8):
+    fixed_mean = func.interpolate(
+        func.avg_pool2d(fixed, k),
+        fixed.shape[2:]
+    )
+    moved_mean = func.interpolate(
+        func.avg_pool2d(moved, k),
+        moved.shape[2:]
+    )
+    fixed_norm = fixed - fixed_mean
+    moved_norm = moved - moved_mean
+    fixed_sq = func.avg_pool2d(fixed_norm ** 2, k)
+    moved_sq = func.avg_pool2d(moved_norm ** 2, k)
+
+    den = torch.sqrt(fixed_sq * moved_sq)
+    num = func.avg_pool2d(fixed_norm * moved_norm, k)
+
+    xcor = torch.mean(num / den)
+
+    return 1. - xcor
+
+
+def mse_loss(fixed, moved, mask=None):
+    if mask is None:
+        mse = func.mse_loss(moved, fixed)
+    else:
+        valid_fixed = fixed[mask]
+        valid_moved = moved[mask]
+        mse = func.mse_loss(valid_moved, valid_fixed)
+
+    return mse
+
+
+def registration2d(
+    fixed, moving, mask=None, init_affine=None,
+    scales=None, epochs=500, patience=20, init_lr=1e-2, loss_f=xcor_loss,
+    device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+):
+    if scales is None:
+        scales = [4, 2, 1]
+
+    best_fit = np.inf
+    final_e = 0
+    final_fit = np.inf
+
+    fixed_tensor = torch.from_numpy(fixed).view((1, 1) + fixed.shape).to(device)
+    if mask is not None:
+        mask_tensor = torch.from_numpy(mask).view((1, 1) + fixed.shape).to(device)
+    learnable_affine = torch.tensor(
+        init_affine.cpu().numpy()[:2, :], device=device,
+        requires_grad=True, dtype=torch.float32
+    )
+    fixed_affine = torch.tensor(
+        init_affine.cpu().numpy()[2:, :], device=device,
+        requires_grad=False, dtype=torch.float32
+    )
+    affine = torch.cat([learnable_affine, fixed_affine])
+
+    lr = init_lr
+    best_affine = init_affine.detach()
+
+    for s in scales:
+        optimizer = torch.optim.SGD([affine], lr=lr)
+        no_improv = 0
+        for e in range(epochs):
+            moved = resample(moving, fixed, affine)
+            moved_tensor = moved.view((1, 1) + fixed.shape)
+            moved_s = func.avg_pool2d(moved_tensor, s)
+            fixed_s = func.avg_pool2d(fixed_tensor, s)
+            if mask is None:
+                loss = loss_f(moved_s, fixed_s)
+            else:
+                mask_s = func.max_pool2d(mask_tensor, s) > 0
+                loss = loss_f(moved_s, fixed_s, mask_s)
+            loss_value = loss.detach().cpu().numpy().tolist()
+            print(' '.join([' '] * 300), end='\r')
+            print('Epoch {:03d} [scale {:02d}]: {:8.4f}'.format(
+                e + 1, s, loss_value
+            ), end='\r')
+            if loss_value < best_fit:
+                final_e = e
+                final_fit = loss_value
+                best_fit = loss_value
+                best_affine = affine.detach()
+            else:
+                no_improv += 1
+                if no_improv == patience:
+                    break
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        affine = torch.tensor(
+            best_affine.cpu().numpy(), device=device, requires_grad=True,
+            dtype=torch.float32
+        )
+        best_fit = np.inf
+        lr = lr / 5
+
+    return best_affine, final_e, final_fit
+
+
+def resample(moving, fixed, affine):
+    image_tensor = torch.from_numpy(
+        moving.astype(np.float32)
+    ).view(
+        (1, 1) + moving.shape
+    ).to(affine.device)
+
+    grid = func.affine_grid(
+        affine.view((1,) + affine.shape)[:, :-1, :],
+        (1, 1) + fixed.shape,
+        align_corners=True
+    )
+
+    moved = func.grid_sample(
+        image_tensor, grid,
+        align_corners=True
+    ).view(fixed.shape)
+
+    return moved
