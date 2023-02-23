@@ -116,68 +116,100 @@ def warp_image_ellipse(
     image, theta, height, width, a, b, center_x, center_y, flip=False,
     device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 ):
-    # half_x = width / 2
-    # half_y = height / 2
-    # theta = torch.tensor(theta, device=device, requires_grad=True)
-    # x = torch.arange(start=0, end=width, step=1)
-    # y = torch.arange(start=0, end=height, step=1)
-    # grid_x, grid_y = torch.meshgrid(x, y, indexing='xy')
-    # new_x, new_y = rotate_points_origin(
-    #     grid_x, grid_y, theta, center_x, center_y
-    # )
-    # offset_x = center_x - half_x
-    # offset_y = center_y - half_y
-    # ratio_x = a / half_x
-    # ratio_y = b / half_y
-    #
-    # rot_offset_x, rot_offset_y = rotate_points(
-    #     torch.tensor(offset_x), torch.tensor(offset_y), theta
-    # )
-    #
-    # offset_x += ratio_x * rot_offset_x
-    # offset_y += ratio_y * rot_offset_y
-    #
-    # image_tensor = torch.from_numpy(image).float().view(1, 1, height, width)
-    # grid_tensor = torch.stack([
-    #     2 * (ratio_x * new_x.float().to(device) + offset_x) / width,
-    #     2 * (ratio_y * new_y.float().to(device) + offset_y) / height
-    # ], dim=-1).unsqueeze(0)
-    #
-    # registered_image = func.grid_sample(
-    #     image_tensor.to(grid_tensor.device), grid_tensor,
-    #     align_corners=True
-    # )
-    #
-    # final_image = registered_image.view(height, width)
-    affine = get_affine_matrix(
-        theta, height, width, a, b, center_x, center_y, device
+    half_x = width / 2
+    half_y = height / 2
+    theta = torch.tensor(theta, device=device, requires_grad=True)
+    x = torch.arange(start=0, end=width, step=1)
+    y = torch.arange(start=0, end=height, step=1)
+    grid_x, grid_y = torch.meshgrid(x, y, indexing='xy')
+    new_x, new_y = rotate_points_origin(
+        grid_x, grid_y, theta, center_x, center_y
     )
-    print(affine)
-    final_image = resample(image, image, affine)
+    offset_x = center_x - half_x
+    offset_y = center_y - half_y
+    ratio_x = a / half_x
+    ratio_y = b / half_y
+
+    rot_offset_x, rot_offset_y = rotate_points(
+        torch.tensor(offset_x), torch.tensor(offset_y), theta
+    )
+
+    offset_x += ratio_x * rot_offset_x
+    offset_y += ratio_y * rot_offset_y
+
+    image_tensor = torch.from_numpy(image).float().view(1, 1, height, width)
+    grid_tensor = torch.stack([
+        2 * (ratio_x * new_x.float().to(device) + offset_x) / width,
+        2 * (ratio_y * new_y.float().to(device) + offset_y) / height
+    ], dim=-1).unsqueeze(0)
+
+    registered_image = func.grid_sample(
+        image_tensor.to(grid_tensor.device), grid_tensor,
+        align_corners=True
+    )
+
+    final_image = registered_image.view(height, width)
     if flip:
         final_image = final_image[::-1, :].clone()
 
     return final_image
 
 
+def new_warp_image_ellipse(
+    image, theta, height, width, a, b, center_x, center_y, flip=False,
+    device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+):
+    torch_scale = torch.tensor([
+        [1, 1, 2 / width],
+        [1, 1, 2 / height],
+        [1, 1, 1],
+    ], dtype=torch.float32, device=device)
+    torch_tx = torch.tensor([
+        [0, 0, width / 2],
+        [0, 0, height / 2],
+        [0, 0, 0],
+    ], dtype=torch.float32, device=device)
+    affine = torch.inverse(get_affine_matrix(
+        theta, height, width, a, b, center_x, center_y, False, device
+    ) + torch_tx) * torch_scale
+    print(
+        (2 * (center_x - a * np.cos(theta)) - width) / width,
+        (2 * (center_y - b * np.cos(theta)) - height) / height,
+        (2 * (center_x + a * np.cos(theta)) - width) / width,
+        (2 * (center_y + b * np.cos(theta)) - height) / height,
+    )
+    final_image = resample(
+        image, image, affine
+    )
+    if flip:
+        final_image = final_image[::-1, :].clone()
+    return final_image
+
+
 def get_affine_matrix(
-    theta, height, width, a, b, center_x, center_y,
+    theta, height, width, a, b, center_x, center_y, trans=True,
     device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 ):
     # Init
-    translation_tensor = torch.tensor(
-        [[-center_x], [-center_y]], requires_grad=True,
-        dtype=torch.float32, device=device
-    )
+    if trans:
+        translation_tensor = torch.tensor(
+            [[-center_x], [-center_y]],
+            dtype=torch.float32, device=device
+        )
+    else:
+        translation_tensor = torch.tensor(
+            [[-center_x + width / 2], [-center_y + height / 2]],
+            dtype=torch.float32, device=device
+        )
     identity_tensor = torch.tensor(
-        np.eye(2), requires_grad=True, dtype=torch.float32, device=device
+        np.eye(2), dtype=torch.float32, device=device
     )
     fixed_tensor = torch.cat([
         torch.zeros(
-            (1, 2), requires_grad=True, dtype=torch.float32, device=device
+            (1, 2), dtype=torch.float32, device=device
         ),
         torch.ones(
-            (1, 1), requires_grad=True, dtype=torch.float32, device=device
+            (1, 1), dtype=torch.float32, device=device
         )
     ], dim=1)
     to_center = torch.cat([
@@ -185,25 +217,20 @@ def get_affine_matrix(
         fixed_tensor
     ], dim=0)
 
-    # sx = 4 * a / width ** 2
-    # sy = 4 * b / height ** 2
-    # tx = (2 * center_x - width) / (2 * width)
-    # ty = (2 * center_y - height) / (2 * height)
-    sx = 1
-    sy = 1
-    tx = 0
-    ty = 0
+    half_x = width / 2
+    half_y = height / 2
+    sx = half_x / a
+    sy = half_y / b
 
     ellipse_affine = torch.tensor(
         [
-            [sx * np.cos(theta), - sx * np.sin(theta), tx],
-            [sy * np.sin(theta), - sy * np.cos(theta), ty],
+            [sx * np.cos(theta), - sx * np.sin(theta), half_x],
+            [sy * np.sin(theta), sy * np.cos(theta), half_y],
             [0, 0, 1],
         ], requires_grad=True, dtype=torch.float32, device=device
     )
 
-    # return ellipse_affine @ to_center
-    return to_center
+    return ellipse_affine @ to_center
 
 
 def rotate_points(x, y, theta):
@@ -229,11 +256,15 @@ def rotate_points_origin(x, y, theta, center_x, center_y):
 def warp_points_ellipse(
     x, y, theta, center_x, center_y, half_x, half_y, a, b, flip=False
 ):
-    ratio_x = half_x / a
-    ratio_y = half_y / b
-    rot_x, rot_y = rotate_points_origin(x, y, theta, center_x, center_y)
-    new_x = ratio_x * (rot_x + a)
-    new_y = ratio_y * (rot_y + b)
+    affine = get_affine_matrix(
+        theta, half_y * 2, half_x * 2, a, b, center_x, center_y
+    )
+    points = torch.stack([
+        x, y, torch.ones_like(x)
+    ]).to(affine.device, torch.float32)
+    new_points = affine @ points
+    new_x = new_points[0, :].detach().cpu()
+    new_y = new_points[1, :].detach().cpu()
     if flip:
         new_y = half_y * 2 - new_y
 
@@ -519,6 +550,11 @@ def resample(moving, fixed, affine):
         (1, 1) + fixed.shape,
         align_corners=True
     )
+    print(
+        grid.view(-1, 2).min(axis=0)[0].detach().cpu().numpy(),
+        grid.view(-1, 2).max(axis=0)[0].detach().cpu().numpy()
+    )
+
 
     moved = func.grid_sample(
         image_tensor, grid,
