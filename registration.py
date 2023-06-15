@@ -296,7 +296,7 @@ def skull_registration(path, subject, net, reference=None, ref_mask=None):
             - (np.pi + theta), height, width, a, b, x0, y0
         )
         reg_bck = resample(
-            image, image, torch.inverse(bck_affine), True
+            image, reference, torch.inverse(bck_affine), True
         ).view(height, width).cpu().detach().numpy()
 
         # Similarity metrics

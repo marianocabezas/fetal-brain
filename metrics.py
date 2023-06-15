@@ -120,28 +120,26 @@ def polygonsDice(set1, set2):
         aux[im2 == 0] = 0
         XandY = np.sum(aux == 255)
 
-        dsc = 2 * XandY / (X + Y)
+        if (X + Y) > 0:
+            dsc = 2 * XandY / (X + Y)
+        else:
+            dsc = 0
     else:
         dsc = None
 
     return dsc
 
 
-
 def MSE(im1,im2):
     """
     Mean Squared Error image metric
     """
-    return  mean_squared_error(img1, im2)
+    return  mean_squared_error(im1, im2)
 
 def SSIM(im1,im2):
     """
     Structural Similarity Index image metric
     """
-    return ssim(im1, im2,data_range=max(im1.max(),im2.max()) - min(im1.min(),im2.min()))
+    data_range = max(im1.max(),im2.max()) - min(im1.min(),im2.min())
+    return ssim(im1, im2,data_range=data_range)
 
-def NMI(im1,im2):
-    """
-    Normalized mutual informacion image metric
-    """
-    return nmi(im1,im2)
