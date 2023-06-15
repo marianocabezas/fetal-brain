@@ -365,7 +365,7 @@ def classic_registration(
     )
     height, width = image.shape
     reg_img = resample(
-        image, image, affine, flip
+        image, reference, affine, flip
     ).view(height, width).cpu().detach().numpy()
 
     image_data = (reg_img, image, torch.inverse(affine))
