@@ -9,21 +9,22 @@ from skimage.metrics import structural_similarity as ssim
 
 
 def hausdorff(set1, set2):
-    """ Given two sets of points, compute their hausdorff distance
+    """
+    Given two sets of points, compute their hausdorff distance
 
     """
     return directed_hausdorff(set1, set2)[0]
 
 
 """
-The following function can be made much more efficient with Kd-trees (but 
+The following functions can be made much more efficient with Kd-trees (but 
  probably no need given our data sizes)
 """
 
 
 def avEUC(set1, set2):
     """
-    Average euclidean distance from a point in one set to the closest point
+    Average Euclidean distance from a point in one set to the closest point
     in the other set
     """
 
@@ -130,13 +131,13 @@ def polygonsDice(set1, set2):
     return dsc
 
 
-def MSE(im1,im2):
+def MSE(im1, im2):
     """
     Mean Squared Error image metric
     """
-    return  mean_squared_error(im1, im2)
+    return mean_squared_error(im1, im2)
 
-def SSIM(im1,im2):
+def SSIM(im1, im2):
     """
     Structural Similarity Index image metric
     """
