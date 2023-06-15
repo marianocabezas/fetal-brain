@@ -56,6 +56,89 @@ def load_xcf(path):
     return image, data, labels, points
 
 
+def load_vol(path):
+    """
+    Given the name of a vol file, this functions reads the Kretzfile step by
+    step, extract a list of images along with a list of layer names and returns
+    them as two lists.
+    :param path: Path to the image.
+    :return: list of the layer names and their data (images).
+    """
+    with open(path, 'rb') as f:
+        images = []
+        resolution = None
+        f.seek(16)
+        while True:
+            tag_shorts = np.frombuffer(f.read(4), dtype=np.ushort)
+            if len(tag_shorts) < 2:
+                break
+            group, element = tag_shorts
+            tag_length = np.frombuffer(f.read(4), dtype=np.uint32)
+            data = f.read(tag_length[0])
+
+            if group == 0x0110 and element == 0x0002:
+                print(hex(group), hex(element), str(data))
+            elif group == 0xd100 and element == 0x0001:
+                print(hex(group), hex(element), str(data))
+            elif group == 0xc000 and element == 0x0001:
+                print(
+                    'Dimension X', np.frombuffer(data, dtype=np.uint16)
+                )
+                dim_x = np.frombuffer(data, dtype=np.uint16)[0]
+            elif group == 0xc000 and element == 0x0002:
+                print(
+                    'Dimension Y', np.frombuffer(data, dtype=np.uint16)
+                )
+                dim_y = np.frombuffer(data, dtype=np.uint16)[0]
+            elif group == 0xc000 and element == 0x0003:
+                print(
+                    'Dimension Z', np.frombuffer(data, dtype=np.uint16)
+                )
+                dim_z = np.frombuffer(data, dtype=np.uint16)[0]
+            elif group == 0xc100 and element == 0x0001:
+                resolution = np.frombuffer(data, dtype=np.float64)
+                print(
+                    'Resolution', resolution
+                )
+            elif group == 0xc200 and element == 0x0001:
+                print(
+                    'Offset1', np.frombuffer(data, dtype=np.float64)
+                )
+            elif group == 0xc200 and element == 0x0002:
+                print(
+                    'Offset2', np.frombuffer(data, dtype=np.float64)
+                )
+            elif group == 0xc300 and element == 0x0001:
+                angles = np.frombuffer(data, dtype=np.float64)
+                amin = angles[0]
+                amax = angles[-1]
+                b_centre = (amin + amax) / 2
+                angles = angles - b_centre
+                print(
+                    r'Angles $\phi$', angles
+                )
+            elif group == 0xc300 and element == 0x0002:
+                angles = np.frombuffer(data, dtype=np.float64)
+                amin = angles[0]
+                amax = angles[-1]
+                b_centre = (amin + amax) / 2
+                angles = angles - b_centre
+                print(
+                    r'Angles $\theta$', angles
+                )
+            elif group == 0xd000 and element != 0xffff:
+                print(
+                    'Image', hex(group), hex(element), tag_length / (800 * 600)
+                )
+                images.append(data)
+
+    image = np.reshape(
+        np.frombuffer(images[0], dtype=np.uint8), (dim_z, dim_y, dim_x)
+    )
+
+    return image, resolution
+
+
 def normalise_image(image):
     """
     Function to normalise the image to its intensity z-scores. No region

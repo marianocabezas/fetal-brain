@@ -194,23 +194,32 @@ def registration2d(
     return best_affine, final_e, final_fit
 
 
-def resample(moving, fixed, affine, flip=False):
-    height, width = moving.shape
+def resample(moving, fixed, affine, flip=False, mode='bilinear'):
+    m_height, m_width = moving.shape
+    f_height, f_width = fixed.shape
     image_tensor = torch.from_numpy(
         moving.astype(np.float32)
     ).view(
         (1, 1) + moving.shape
     ).to(affine.device)
+    if f_width == m_width:
+        x_step = 1
+    else:
+        x_step = m_width / f_width
     x = torch.arange(
-        start=0, end=width, step=1
+        start=0, end=m_width, step=x_step
     ).to(dtype=torch.float64, device=affine.device)
+    if f_height == m_height:
+        y_step = 1
+    else:
+        y_step = m_height / f_height
     if flip:
         y = torch.arange(
-            start=height - 1, end=-1, step=-1
+            start=m_height - 1, end=m_height - f_height - 1, step=-y_step
         ).to(dtype=torch.float64, device=affine.device)
     else:
         y = torch.arange(
-            start=0, end=height, step=1
+            start=0, end=m_height, step=y_step
         ).to(dtype=torch.float64, device=affine.device)
     grid_x, grid_y = torch.meshgrid(x, y, indexing='xy')
     grid = torch.stack([
@@ -219,22 +228,21 @@ def resample(moving, fixed, affine, flip=False):
         torch.ones_like(grid_x.flatten())
     ], dim=0)
     scales = torch.tensor(
-        [[width], [height]],
+        [[m_width], [m_height]],
         dtype=torch.float64, device=affine.device
     )
     affine_grid = 2 * (affine @ grid)[:2, :] / scales - 1
 
     tensor_grid = torch.swapaxes(affine_grid, 0, 1).view(
-        1, height, width, 2
+        1, f_height, f_width, 2
     )
 
     moved = func.grid_sample(
         image_tensor, tensor_grid.to(dtype=torch.float32),
-        align_corners=True
+        align_corners=True, mode=mode
     ).view(fixed.shape)
 
     return moved
-
 
 
 def skull_registration(path, subject, net, reference=None, ref_mask=None):
@@ -270,11 +278,17 @@ def skull_registration(path, subject, net, reference=None, ref_mask=None):
             torch.tensor(a), torch.tensor(b), torch.tensor(theta),
             torch.tensor(x0), torch.tensor(y0), height, width
         ).numpy() < 0
-        mask = np.logical_and(ref_mask, new_mask).astype(np.float32)
+        if ref_mask.shape == new_mask.shape:
+            mask = np.logical_and(ref_mask, new_mask).astype(np.float32)
+        else:
+            t_mask = resample(
+                ref_mask, new_mask, torch.inverse(affine), False, 'nearest'
+            )
+            mask = np.logical_and(t_mask, new_mask).astype(np.float32)
 
         # Forward transformation (no flip)
         reg_fwd = resample(
-            image, image, torch.inverse(affine), False
+            image, reference, torch.inverse(affine), False
         ).view(height, width).cpu().detach().numpy()
 
         # Backward transformation (with flip)
