@@ -157,14 +157,14 @@ def normalise_image(image):
 
 def clean_ux(image):
     """
-    Function designed to clean the UX from a US image from Girons.
+    Function designed to clean the UX from a US image from Girona.
 
     :param image: Image with the UX.
     :return: a clean image without UX.
     """
     new_image = image.copy()
     new_image[:50, ...] = 0
-    new_image[:150, 700:] = 0
+    new_image[:150, -100:] = 0
     new_image[:, :40] = 0
 
     return new_image
