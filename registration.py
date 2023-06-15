@@ -363,7 +363,7 @@ def classic_registration(
         reference, image, ref_mask, init_affine, flip=flip,
         init_lr=lr, loss_f=loss_f,
     )
-    height, width = image.shape
+    height, width = reference.shape
     reg_img = resample(
         image, reference, affine, flip
     ).view(height, width).cpu().detach().numpy()
