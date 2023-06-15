@@ -273,6 +273,7 @@ def skull_registration(path, subject, net, reference=None, ref_mask=None):
         ).numpy() < 0
         title_s = 'Reference [{:}]'.format(sub_code)
     else:
+        r_height, r_width = reference.shape
         # Mask
         new_mask = ellipse_to_mask(
             torch.tensor(a), torch.tensor(b), torch.tensor(theta),
@@ -283,13 +284,13 @@ def skull_registration(path, subject, net, reference=None, ref_mask=None):
         else:
             t_mask = resample(
                 ref_mask, new_mask, torch.inverse(affine), False, 'nearest'
-            )
+            ).view(height, width).cpu().detach().numpy()
             mask = np.logical_and(t_mask, new_mask).astype(np.float32)
 
         # Forward transformation (no flip)
         reg_fwd = resample(
             image, reference, torch.inverse(affine), False
-        ).view(height, width).cpu().detach().numpy()
+        ).view(r_height, r_width).cpu().detach().numpy()
 
         # Backward transformation (with flip)
         bck_affine = get_affine_matrix(
@@ -297,7 +298,7 @@ def skull_registration(path, subject, net, reference=None, ref_mask=None):
         )
         reg_bck = resample(
             image, reference, torch.inverse(bck_affine), True
-        ).view(height, width).cpu().detach().numpy()
+        ).view(r_height, r_width).cpu().detach().numpy()
 
         # Similarity metrics
         ssim_values = [
