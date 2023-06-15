@@ -258,11 +258,10 @@ def skull_registration(path, subject, net, reference=None, ref_mask=None):
         seg = torch.sigmoid(net(data_tensor)).detach().cpu().squeeze().numpy()
     a, b, x0, y0, theta = robust_fit_ellipse(seg > 0.5)
 
-    affine = get_affine_matrix(
-        - theta, height, width, a, b, x0, y0
-    )
-
     if reference is None:
+        affine = get_affine_matrix(
+            - theta, height, width, a, b, x0, y0
+        )
         flip = False
         reg_image = resample(
             image, image, torch.inverse(affine), flip
@@ -274,6 +273,9 @@ def skull_registration(path, subject, net, reference=None, ref_mask=None):
         title_s = 'Reference [{:}]'.format(sub_code)
     else:
         r_height, r_width = reference.shape
+        affine = get_affine_matrix(
+            - theta, r_height, r_width, a, b, x0, y0
+        )
         # Mask
         new_mask = ellipse_to_mask(
             torch.tensor(a), torch.tensor(b), torch.tensor(theta),
