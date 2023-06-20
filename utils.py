@@ -169,6 +169,14 @@ def clean_ux(image):
 
     return new_image
 
+def makeDict(names,points):
+    """
+    Given two lists of layers and another list with the lists of points in each layer at every position,
+    create a dictionary with layer names as keys
+    and the lists of points as values
+    """
+    return { names[i]: points[i] for i in range(len(names)) }
+
 
 def get_points(image):
     """
