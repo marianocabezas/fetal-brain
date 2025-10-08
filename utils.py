@@ -56,6 +56,8 @@ def load_xcf(path):
     return image, data, labels, points
 
 
+
+
 def load_vol(path):
     """
     Given the name of a vol file, this functions reads the Kretzfile step by
