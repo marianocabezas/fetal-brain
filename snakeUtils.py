@@ -15,7 +15,7 @@ from metrics import hull, concave_hull, convex_hull
 
 import numpy as np
 import matplotlib.pyplot as plt
-from skimage import data, img_as_float
+from skimage import img_as_float
 from skimage.segmentation import morphological_chan_vese
 
 
