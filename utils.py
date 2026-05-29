@@ -1,10 +1,13 @@
 import cv2
-import torch
+import gzip
+import pickle
 import numpy as np
 from gimpformats.gimpXcfDocument import GimpDocument
 from scipy.ndimage import binary_dilation
 from skimage.morphology import skeletonize
 from matplotlib.image import imread
+
+import torch
 
 
 """
@@ -53,7 +56,7 @@ def load_atlas_sample(path):
     return data, image
 
 
-def load_xcf(path):
+def load_xcf_points(path):
     """
     Given the name of a xcf file, this functions reads it using GimpDocument,
     extract a list of images along with a list of layer names and returns them
@@ -81,6 +84,19 @@ def load_xcf(path):
     return image, data, labels, points
 
 
+# Fetal US images utility functions
+def load_xcf(path):
+    """
+        Read an image plus annotations
+        and return
+    """
+    project = GimpDocument(path)
+    layers = project.raw_layers
+    names, data = zip(*[
+        (layer.name, layer.image) for layer in layers
+        if not layer.isGroup
+    ])
+    return names, data
 
 
 def load_vol(path):
@@ -442,3 +458,14 @@ def ellipse_parameters(a, b, theta, x0, y0):
     F = A * x0_2 + B * x0 * y0 + C * y0_2 - a_2 * b_2
 
     return A, B, C, D, E, F
+
+
+def save_compressed_pickle(data, path):
+    with gzip.open(path, 'wb') as f:
+        pickle.dump(data, f)
+
+
+def load_compressed_pickle(path):
+    with gzip.open(path, 'rb') as f:
+        data = pickle.load(f)
+    return data
