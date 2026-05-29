@@ -12,6 +12,31 @@ Image reading functions
 """
 
 
+def color_codes():
+    """
+    Function that returns a custom dictionary with ASCII codes related to
+    colors.
+    :return: Custom dictionary with ASCII codes for terminal colors.
+    """
+    codes = {
+        'nc': '\033[0m',
+        'b': '\033[1m',
+        'k': '\033[0m',
+        '0.25': '\033[30m',
+        'dgy': '\033[30m',
+        'r': '\033[31m',
+        'g': '\033[32m',
+        'gc': '\033[32m;0m',
+        'bg': '\033[32;1m',
+        'y': '\033[33m',
+        'c': '\033[36m',
+        '0.75': '\033[37m',
+        'lgy': '\033[37m',
+        'clr': '\033[K',
+    }
+    return codes
+
+
 def load_atlas_sample(path):
     """
     This function is created to interact with US images from Girona. As such,
@@ -141,6 +166,19 @@ def load_vol(path):
     return image, resolution
 
 
+def normalise(image):
+    """
+    Function to normalise an image given its mean and standard deviation
+     (z-score).
+    :param image:  Image to normalise.
+    :return:
+    """
+    im_mean = np.mean(image, axis=(1, 2), keepdims=True)
+    im_std = np.std(image, axis=(1, 2), keepdims=True)
+
+    return (image - im_mean) / im_std
+
+
 def normalise_image(image):
     """
     Function to normalise the image to its intensity z-scores. No region
@@ -149,7 +187,7 @@ def normalise_image(image):
     :return: a normalised array ready for training
     """
     # Data normalisation and preparation for the network(s).
-    image_norm = (image - image.mean()) / image.std()
+    image_norm = normalise(image)
     data = np.repeat(
         np.expand_dims(image_norm, 0), 3, axis=0
     ).astype(np.float32)

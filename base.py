@@ -1,5 +1,4 @@
 import time
-import itertools
 from functools import partial
 from copy import deepcopy
 import torch
@@ -72,6 +71,10 @@ class BaseModel(nn.Module):
         self.acc_functions = {}
         self.acc = None
 
+
+    def features(self, *inputs):
+        return self.tokenize(*inputs)
+
     def forward(self, *inputs):
         """
 
@@ -82,8 +85,23 @@ class BaseModel(nn.Module):
         """
         return None
 
+    def observe(self, x, y):
+        # First, we do a forward pass through the network.
+        if isinstance(x, list) or isinstance(x, tuple):
+            x_cuda = tuple(x_i.to(self.device) for x_i in x)
+            pred_labels = self(*x_cuda)
+        else:
+            x_cuda = x.to(self.device)
+            pred_labels = self(x_cuda)
+        if isinstance(y, list) or isinstance(y, tuple):
+            y_cuda = tuple(y_i.to(self.device) for y_i in y)
+        else:
+            y_cuda = y.to(self.device)
+
+        return pred_labels, x_cuda, y_cuda
+
     def mini_batch_loop(
-            self, data, train=True
+        self, data, train=True
     ):
         """
         This is the main loop. It's "generic" enough to account for multiple
@@ -106,21 +124,12 @@ class BaseModel(nn.Module):
         accs = list()
         n_batches = len(data)
         for batch_i, (x, y) in enumerate(data):
-            # In case we are training the gradient to zero.
+            # In case we are training the the gradient to zero.
             if self.training:
                 self.optimizer_alg.zero_grad()
 
             # First, we do a forward pass through the network.
-            if isinstance(x, list) or isinstance(x, tuple):
-                x_cuda = tuple(x_i.to(self.device) for x_i in x)
-                pred_labels = self(*x_cuda)
-            else:
-                x_cuda = x.to(self.device)
-                pred_labels = self(x_cuda)
-            if isinstance(y, list) or isinstance(y, tuple):
-                y_cuda = tuple(y_i.to(self.device) for y_i in y)
-            else:
-                y_cuda = y.to(self.device)
+            pred_labels, x_cuda, y_cuda = self.observe(x, y)
 
             # After that, we can compute the relevant losses.
             if train:
@@ -129,12 +138,17 @@ class BaseModel(nn.Module):
                     l_f['weight'] * l_f['f'](pred_labels, y_cuda)
                     for l_f in self.train_functions
                 ]
-                batch_loss = sum(batch_losses)
+                batch_loss = sum([
+                    l for l in batch_losses if not torch.isnan(l)
+                ])
                 if self.training:
-                    batch_loss.backward()
-                    self.prebatch_update(len(data), x_cuda, y_cuda)
-                    self.optimizer_alg.step()
-                    self.batch_update(len(data), x_cuda, y_cuda)
+                    try:
+                        batch_loss.backward()
+                        self.prebatch_update(batch_i, len(data), x_cuda, y_cuda)
+                        self.optimizer_alg.step()
+                        self.batch_update(batch_i, len(data), x_cuda, y_cuda)
+                    except RuntimeError:
+                        self.prebatch_update(batch_i, len(data), x_cuda, y_cuda)
 
             else:
                 # Validation losses (applied to the validation data)
@@ -145,8 +159,11 @@ class BaseModel(nn.Module):
                 batch_loss = sum([
                     l_f['weight'] * l
                     for l_f, l in zip(self.val_functions, batch_losses)
+                    if not torch.isnan(l)
                 ])
-                mid_losses.append([l.tolist() for l in batch_losses])
+                mid_losses.append([
+                    l.tolist() for l in batch_losses
+                ])
                 batch_accs = [
                     l_f['f'](pred_labels, y_cuda)
                     for l_f in self.acc_functions
@@ -160,8 +177,6 @@ class BaseModel(nn.Module):
             self.print_progress(
                 batch_i, n_batches, loss_value, np.mean(losses)
             )
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
 
         # Mean loss of the global loss (we don't need the loss for each batch).
         mean_loss = np.mean(losses)
@@ -171,9 +186,9 @@ class BaseModel(nn.Module):
         else:
             # If using the validation data, we actually need to compute the
             # mean of each different loss.
-            mean_losses = np.mean(list(zip(*mid_losses)), axis=1)
+            mean_losses = np.nanmean(list(zip(*mid_losses)), axis=1)
             np_accs = np.array(list(zip(*accs)))
-            mean_accs = np.mean(np_accs, axis=1) if np_accs.size > 0 else []
+            mean_accs = np.nanmean(np_accs, axis=1) if np_accs.size > 0 else []
             return mean_loss, mean_losses, mean_accs
 
     def fit(
@@ -245,10 +260,11 @@ class BaseModel(nn.Module):
                     t_out = time.time() - self.t_val
                     t_s = time_to_string(t_out)
 
-                    print(' '.join([' '] * 400), end='\r')
-                    print('Epoch num |  {:}  |'.format(l_hdr))
-                    print('----------|--{:}--|'.format(l_bars))
-                    final_s = ' | '.join(
+                    print('\033[K', end='')
+                    whites = ' '.join([''] * 12)
+                    print('{:}Epoch num |  {:}  |'.format(whites, l_hdr))
+                    print('{:}----------|--{:}--|'.format(whites, l_bars))
+                    final_s = whites + ' | '.join(
                         [epoch_s, tr_loss_s, loss_s] +
                         losses_s + acc_s + [t_s]
                     )
@@ -256,9 +272,10 @@ class BaseModel(nn.Module):
         else:
             # If we don't initialise the losses, we'll just take the maximum
             # ones (inf, -inf) and print just the header.
-            print(' '.join([' '] * 400), end='\r')
-            print('Epoch num |  {:}  |'.format(l_hdr))
-            print('----------|--{:}--|'.format(l_bars))
+            print('\033[K', end='')
+            whites = ' '.join([''] * 12)
+            print('{:}Epoch num |  {:}  |'.format(whites, l_hdr))
+            print('{:}----------|--{:}--|'.format(whites, l_bars))
             best_loss = [np.inf] * len(self.val_functions)
             best_acc = [-np.inf] * len(self.acc_functions)
 
@@ -315,35 +332,38 @@ class BaseModel(nn.Module):
             loss_s = '{:7.4f}'.format(loss_val)
             if improvement_val:
                 self.best_loss_val = loss_val
-                epoch_s = '\033[32mEpoch {:03d}\033[0m'.format(self.epoch)
+                epoch_s = '\033[32mEpoch {:02d} \033[0m'.format(self.epoch)
                 loss_s = '\033[32m{:}\033[0m'.format(loss_s)
                 best_e = self.epoch
                 self.best_state = deepcopy(self.state_dict())
                 self.best_opt = deepcopy(self.optimizer_alg.state_dict())
                 no_improv_e = 0
             else:
-                epoch_s = 'Epoch {:03d}'.format(self.epoch)
+                epoch_s = 'Epoch {:02d} '.format(self.epoch)
                 no_improv_e += 1
 
             t_out = time.time() - self.t_train
             t_s = time_to_string(t_out)
 
+
             if verbose:
-                print(' '.join([' '] * 400), end='\r')
-                final_s = ' | '.join(
+                print(' '.join([' '] * 300), end='\r')
+                whites = ' '.join([''] * 12)
+                final_s = '\033[K' + whites + ' | '.join(
                     [epoch_s, tr_loss_s, loss_s] +
                     losses_s + acc_s + [t_s]
                 )
                 print(final_s)
 
+            self.epoch_update(epochs, train_loader)
+
             if no_improv_e == patience:
                 break
-
-            self.epoch_update(epochs, train_loader)
 
         t_end = time.time() - t_start
         t_end_s = time_to_string(t_end)
         if verbose:
+            print(' '.join([' '] * 300), end='\r')
             print(
                     'Training finished in {:} epochs ({:}) '
                     'with minimum loss = {:f} (epoch {:d})'.format(
@@ -355,144 +375,22 @@ class BaseModel(nn.Module):
         self.epoch = best_e
         self.load_state_dict(self.best_state)
 
-    def embeddings(self, data, nonbatched=True):
-        return self.inference(data, nonbatched)
-
-    def inference(self, data, nonbatched=True, task=None):
-        temp_task = task
-        if temp_task is not None and hasattr(self, 'current_task'):
-            temp_task = self.current_task
-            self.current_task = task
+    def inference(self, data):
         with torch.no_grad():
             if isinstance(data, list) or isinstance(data, tuple):
                 x_cuda = tuple(
                     torch.from_numpy(x_i).to(self.device)
                     for x_i in data
                 )
-                if nonbatched:
-                    x_cuda = tuple(
-                        x_i.unsqueeze(0) for x_i in x_cuda
-                    )
 
                 output = self(*x_cuda)
             else:
                 x_cuda = torch.from_numpy(data).to(self.device)
-                if nonbatched:
-                    x_cuda = x_cuda.unsqueeze(0)
                 output = self(x_cuda)
-            torch.cuda.empty_cache()
 
-            if len(output) > 1:
-                np_output = output.cpu().numpy()
-            else:
-                np_output = output[0, 0].cpu().numpy()
-        if temp_task is not None and hasattr(self, 'current_task'):
-            self.current_task = temp_task
+            np_output = output.cpu().numpy()
 
         return np_output
-
-    def patch_inference(
-        self, data, patch_size, batch_size, case=0, n_cases=1, t_start=None
-    ):
-        # Init
-        self.eval()
-
-        # Init
-        t_in = time.time()
-        if t_start is None:
-            t_start = t_in
-
-        # This branch is only used when images are too big. In this case
-        # they are split in patches and each patch is trained separately.
-        # Currently, the image is partitioned in blocks with no overlap,
-        # however, it might be a good idea to sample all possible patches,
-        # test them, and average the results. I know both approaches
-        # produce unwanted artifacts, so I don't know.
-        # Initial results. Filled to 0.
-        if isinstance(data, tuple):
-            data_shape = data[0].shape[1:]
-        else:
-            data_shape = data.shape[1:]
-        seg = np.zeros(data_shape)
-        counts = np.zeros(data_shape)
-
-        # The following lines are just a complicated way of finding all
-        # the possible combinations of patch indices.
-        steps = [
-            list(
-                range(0, lim - patch_size, patch_size // 4)
-            ) + [lim - patch_size]
-            for lim in data_shape
-        ]
-
-        steps_product = list(itertools.product(*steps))
-        batches = range(0, len(steps_product), batch_size)
-        n_batches = len(batches)
-
-        # The following code is just a normal test loop with all the
-        # previously computed patches.
-        for bi, batch in enumerate(batches):
-            # Here we just take the current patch defined by its slice
-            # in the x and y axes. Then we convert it into a torch
-            # tensor for testing.
-            slices = [
-                (
-                    slice(xi, xi + patch_size),
-                    slice(xj, xj + patch_size),
-                    slice(xk, xk + patch_size)
-                )
-                for xi, xj, xk in steps_product[batch:(batch + batch_size)]
-            ]
-
-            # Testing itself.
-            with torch.no_grad():
-                if isinstance(data, list) or isinstance(data, tuple):
-                    batch_cuda = tuple(
-                        torch.stack([
-                            torch.from_numpy(
-                                x_i[slice(None), xslice, yslice, zslice]
-                            ).type(torch.float32).to(self.device)
-                            for xslice, yslice, zslice in slices
-                        ])
-                        for x_i in data
-                    )
-                    seg_out = self(*batch_cuda)
-                else:
-                    batch_cuda = torch.stack([
-                        torch.from_numpy(
-                            data[slice(None), xslice, yslice, zslice]
-                        ).type(torch.float32).to(self.device)
-                        for xslice, yslice, zslice in slices
-                    ])
-                    seg_out = self(batch_cuda)
-                torch.cuda.empty_cache()
-
-            # Then we just fill the results image.
-            for si, (xslice, yslice, zslice) in enumerate(slices):
-                counts[xslice, yslice, zslice] += 1
-                seg_bi = seg_out[si, 0].cpu().numpy()
-                seg[xslice, yslice, zslice] += seg_bi
-
-            # Printing
-            self.print_batch(bi, n_batches, case, n_cases, t_start, t_in)
-
-        seg /= counts
-
-        return seg
-
-    def reset_optimiser(self):
-        """
-        Abstract function to rest the optimizer.
-        :return: Nothing.
-        """
-        self.epoch = 0
-        self.t_train = 0
-        self.t_val = 0
-        self.best_loss_tr = np.inf
-        self.best_loss_val = np.inf
-        self.best_state = None
-        self.best_opt = None
-        return None
 
     def epoch_update(self, epochs, loader):
         """
@@ -504,7 +402,7 @@ class BaseModel(nn.Module):
         """
         return None
 
-    def prebatch_update(self, batches, x, y):
+    def prebatch_update(self, batch, batches, x, y):
         """
         Callback function to update something on the model before the batch
         update is applied. To be reimplemented if necessary.
@@ -515,7 +413,7 @@ class BaseModel(nn.Module):
         """
         return None
 
-    def batch_update(self, batches, x, y):
+    def batch_update(self, batch, batches, x, y):
         """
         Callback function to update something on the model after the batch
         is finished. To be reimplemented if necessary.
@@ -538,21 +436,10 @@ class BaseModel(nn.Module):
         :param mean_loss: Current mean loss.
         :return: None.
         """
-        if self.epoch is not None:
-            epoch_name = 'Epoch {:03}'.format(self.epoch)
-            grad_s = ' / '.join([
-                '{:} {:f} ± {:f} [{:f}, {:f}]'.format(
-                    name, p.data.mean(), p.data.std(), p.data.min(), p.data.max()
-                )
-                for name, p in self.named_parameters()
-                if p.requires_grad and torch.isnan(p.data.mean())
-            ])
-        else:
-            epoch_name = 'Init'
-            grad_s = ''
-        percent = 20 * (batch_i + 1) // n_batches
+        init_c = '\033[0m' if self.training else '\033[38;5;238m'
+        percent = 25 * (batch_i + 1) // n_batches
         progress_s = ''.join(['█'] * percent)
-        remainder_s = ''.join([' '] * (20 - percent))
+        remainder_s = ''.join([' '] * (25 - percent))
         loss_name = 'train_loss' if self.training else 'val_loss'
 
         if self.training:
@@ -563,14 +450,14 @@ class BaseModel(nn.Module):
 
         t_eta = (t_out / (batch_i + 1)) * (n_batches - (batch_i + 1))
         eta_s = time_to_string(t_eta)
-        epoch_hdr = '{:} ({:03d}/{:03d} - {:05.2f}%) [{:}] '
-        loss_s = '{:} {:4.3f} ({:4.3f}) {:} / ETA {:}'
-        batch_s = (epoch_hdr + loss_s + grad_s).format(
-            epoch_name, batch_i + 1, n_batches,
-                        100 * (batch_i + 1) / n_batches, progress_s + remainder_s,
+        epoch_hdr = '{:}Epoch {:03} ({:03d}/{:03d} - {:05.2f}%) [{:}] '
+        loss_s = '{:} {:f} ({:f}) {:} / ETA {:}'
+        batch_s = (epoch_hdr + loss_s).format(
+            init_c, self.epoch, batch_i + 1, n_batches,
+            100 * (batch_i + 1) / n_batches, progress_s + remainder_s,
             loss_name, b_loss, mean_loss, time_s, eta_s + '\033[0m'
         )
-        print(' '.join([' '] * 400), end='\r')
+        print(' '.join([' '] * 300), end='\r')
         print('\033[K' + batch_s, end='\r', flush=True)
 
     @staticmethod
@@ -593,8 +480,8 @@ class BaseModel(nn.Module):
             100 * (pi + 1) / n_patches,
             progress_s, remainder_s, time_s, eta_s + '\033[0m'
         )
-        print('\033[K', end='', flush=True)
-        print(batch_s, end='\r', flush=True)
+        print(' '.join([' '] * 300), end='\r')
+        print('\033[K' + batch_s, end='\r', flush=True)
 
     def freeze(self):
         """
@@ -621,7 +508,8 @@ class BaseModel(nn.Module):
 
     def load_model(self, net_name):
         self.load_state_dict(
-            torch.load(net_name, map_location=self.device)
+            torch.load(net_name, map_location=self.device),
+            strict=True
         )
 
 

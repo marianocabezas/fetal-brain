@@ -83,3 +83,27 @@ class SkullUSDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
+
+
+class FetalDataset(Dataset):
+    """
+    Dataset that walks a folder,
+    creates all label images if
+    they did not exist and store
+    images and labels,
+    needs a dictionary indicating the
+    layers of interest as well as those that are areas
+    the US image should be the layer in the final position
+    """
+    def __init__(self, images, masks):
+        self.images = images
+        self.masks = masks
+
+    def __getitem__(self, index):
+        x = np.moveaxis(self.images[index], -1, 0).astype(np.float32)
+        target = self.masks[index].astype(np.int64)
+
+        return x, target
+
+    def __len__(self):
+        return len(self.images)
