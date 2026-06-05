@@ -6,6 +6,7 @@ import skimage.io as skio
 from shutil import copyfile
 from functools import partial
 from scipy.ndimage import binary_fill_holes
+from utils import load_xcf
 
 from experiments_yago import SegmentationExperiment
 from time import time, strftime
@@ -154,7 +155,8 @@ def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, v
 
 if __name__ == '__main__':
 
-    xcf_path, dicom_path, out_path, debug_path = 'Anotacions 2026/', 'Cerebel_dicom_anonim/', 'ProcessedData/', 'outDebug/'
+    #xcf_path, dicom_path, out_path, debug_path = 'Anotacions 2026/', 'Cerebel_dicom_anonim/', 'ProcessedData/', 'outDebug/'
+    xcf_path, dicom_path, out_path, debug_path = 'Anotacions 2026/', 'Cerebel_dicom_anonim/', '/home/yago/Yago Lab Dropbox/medicalImaging/experiments/ProcessedData/', 'outDebug/'
     layer_list  = ['cavum', 'cerebel', 'cisterna magna', 'plec nucal', 'midline', 'silvio']
     layer_names = ['cavum', 'cerebellum', 'cisterna magna', 'nuchal fold', 'midline', 'sylvian']
     mode    = 'load_only'  # 'full'
@@ -172,21 +174,35 @@ if __name__ == '__main__':
         ('lraspp-mobilenet',  'LRASPP MobileNet',  partial(LRASPP_MobileNet,     lr=1e-4, pretrained=True)),
         ('unet2d',            'UNet 2D',           partial(Unet2D,               lr=1e-4)),
         ('segformer-b2',      'SegFormer B2',      partial(SegFormer,           lr=1e-4)),
+        ('segformer-b4', 'SegFormer B4', partial(SegFormer, backbone='nvidia/mit-b4', lr=1e-4)),
+        ('segformer-b5', 'SegFormer B5', partial(SegFormer, backbone='nvidia/mit-b5', lr=1e-4)),
     ]
 
     all_results = []
+    t_total_start = time()
     for net_name, display_name, network_f in networks:
+        print('[{:}] Starting {:}'.format(strftime("%d/%m/%Y - %H:%M:%S"), display_name))
+        t_start = time()
         exp = SegmentationExperiment(
             net_name, display_name, 'fetal us segmentation', network_f, global_dict,
             os.path.join(out_path, 'Weights'), os.path.join(out_path, 'Predictions', net_name),
-            classes, n_inputs=3, n_classes=len(classes), epochs=10, patience=5,
-            train_batch=1, test_batch=1, n_seeds=5, verbose=1,
+            classes, n_inputs=3, n_classes=len(classes), epochs=20, patience=5,
+            train_batch=1, test_batch=1, n_seeds=5, verbose=1, save_plots=False,
         )
         _, _, results_df = exp.run(master_seed=42)
         results_df['network'] = display_name
         exp.save_results(results_df, os.path.join(out_path, '{:}_results.csv'.format(net_name)))
         all_results.append(results_df)
         torch.cuda.empty_cache()
+        elapsed = time() - t_start
+        print('[{:}] Finished {:} in {:.0f}m {:.0f}s'.format(
+            strftime("%d/%m/%Y - %H:%M:%S"), display_name, elapsed // 60, elapsed % 60
+        ))
+
+    total = time() - t_total_start
+    print('\nTotal experiment time: {:.0f}h {:.0f}m {:.0f}s'.format(
+        total // 3600, (total % 3600) // 60, total % 60
+    ))
 
     comparison_df = pd.concat(all_results, ignore_index=True)
     comparison_df.to_csv(os.path.join(out_path, 'comparison_results.csv'), index=False)

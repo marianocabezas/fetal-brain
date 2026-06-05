@@ -51,14 +51,6 @@ class Segmenter(BaseModel):
         ]
 
     def _cross_entropy(self, predicted, target):
-        try:
-            target, roi = target
-            predicted = torch.stack([
-                p_i.squeeze(1)[roi] for p_i in torch.split(predicted, 1, dim=1)
-            ], dim=1)
-            target = target[roi]
-        except ValueError:
-            pass
         return F.cross_entropy(predicted, target)
 
     def _intersection(self, predicted, target):
@@ -136,6 +128,12 @@ class Segmenter(BaseModel):
 
     def forward(self, *inputs):
         return None
+
+    def _bn_to_eval(self, module):
+        """Switch all BatchNorm layers to eval mode (avoids single-sample batch norm crash)."""
+        for m in module.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.eval()
 
     def patch_inference(self, data, patch_size, batch_size, case=0, n_cases=1, t_start=None):
         self.eval()
@@ -280,6 +278,8 @@ class DeeplabV3_ResNet50(Segmenter):
 
     def forward(self, data):
         self.dl3.to(self.device)
+        if self.training:
+            self._bn_to_eval(self.dl3)
         return self.dl3(data)['out']
 
     def target_layer(self):
@@ -311,6 +311,8 @@ class DeeplabV3_ResNet101(Segmenter):
 
     def forward(self, data):
         self.dl3.to(self.device)
+        if self.training:
+            self._bn_to_eval(self.dl3)
         return self.dl3(data)['out']
 
     def target_layer(self):
@@ -342,6 +344,8 @@ class DeeplabV3_MobileNet(Segmenter):
 
     def forward(self, data):
         self.dl3.to(self.device)
+        if self.training:
+            self._bn_to_eval(self.dl3)
         return self.dl3(data)['out']
 
     def target_layer(self):
@@ -374,6 +378,8 @@ class LRASPP_MobileNet(Segmenter):
 
     def forward(self, data):
         self.lraspp.to(self.device)
+        if self.training:
+            self._bn_to_eval(self.lraspp)
         return self.lraspp(data)['out']
 
     def target_layer(self):
@@ -412,7 +418,6 @@ class SegFormer(Segmenter):
                  device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"), verbose=True):
         super().__init__(n_outputs)
         from transformers import SegformerForSemanticSegmentation
-        import torch.nn.functional as F
 
         self.channels, self.lr, self.device = n_inputs, lr, device
 
@@ -422,7 +427,6 @@ class SegFormer(Segmenter):
             ignore_mismatched_sizes=True,
         )
 
-        # SegFormer expects 3-channel input — adapt if needed
         if n_inputs != 3:
             old_proj = self.model.segformer.encoder.patch_embeddings[0].proj
             self.model.segformer.encoder.patch_embeddings[0].proj = nn.Conv2d(
@@ -436,8 +440,7 @@ class SegFormer(Segmenter):
 
     def forward(self, data):
         self.model.to(self.device)
-        out = self.model(pixel_values=data).logits  # (B, n_classes, H/4, W/4)
-        # Upsample back to input resolution
+        out = self.model(pixel_values=data).logits
         return F.interpolate(out, size=data.shape[-2:], mode='bilinear', align_corners=False)
 
     def target_layer(self):
