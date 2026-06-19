@@ -94,16 +94,25 @@ class FetalDataset(Dataset):
     needs a dictionary indicating the
     layers of interest as well as those that are areas
     the US image should be the layer in the final position
+
+    If `midlines` is provided (one [a, b, xmin, xmax] vector per image), the
+    target becomes the tuple (seg_mask, midline_vec) so two-head models can
+    train on both. With midlines=None the behaviour is unchanged.
     """
-    def __init__(self, images, masks):
-        self.images = images
-        self.masks = masks
+    def __init__(self, images, masks, midlines=None):
+        self.images   = images
+        self.masks    = masks
+        self.midlines = midlines
 
     def __getitem__(self, index):
         x = np.moveaxis(self.images[index], -1, 0).astype(np.float32)
         target = self.masks[index].astype(np.int64)
 
-        return x, target
+        if self.midlines is None:
+            return x, target
+
+        midline = np.asarray(self.midlines[index], dtype=np.float32)
+        return x, (target, midline)
 
     def __len__(self):
         return len(self.images)
