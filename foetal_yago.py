@@ -7,7 +7,7 @@ from shutil import copyfile
 from functools import partial
 from scipy.ndimage import binary_fill_holes
 from utils import load_xcf
-from midline import midline_from_mask
+from midline import midline_from_mask, MIDLINE_SPEC
 from midline_models import MidlineSegmenter
 
 from experiments_yago import SegmentationExperiment
@@ -216,7 +216,7 @@ if __name__ == '__main__':
         # relative to the endpoint term (different units).
         def network_f(_base_f=base_network_f, **kwargs):
             return MidlineSegmenter(
-                _base_f(**kwargs), degree=1, lambda_int=0.01, lambda_midline=1.0
+                _base_f(**kwargs), spec=MIDLINE_SPEC, lambda_int=0.01, lambda_midline=1.0
             )
 
         print('[{:}] Starting {:}'.format(strftime("%d/%m/%Y - %H:%M:%S"), display_name))

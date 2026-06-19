@@ -55,6 +55,20 @@ def l2_functional_distance(poly_p, poly_q, interval=None):
     return np.sqrt(max(val, 0.0))
 
 
+def piecewise_l2_distance(pw_p, pw_q, interval=None):
+    """
+    L2 functional distance between two PiecewisePolynomials, summed over
+    matched sections (each over the GT section interval by default). For a
+    single-section midline this equals l2_functional_distance.
+    """
+    if len(pw_p.sections) != len(pw_q.sections):
+        raise ValueError('piecewise functions have different section counts')
+    return float(sum(
+        l2_functional_distance(sp, sq, interval)
+        for sp, sq in zip(pw_p.sections, pw_q.sections)
+    ))
+
+
 # torch version for use inside the combined loss (differentiable in coeffs and
 # limits). Kept import-light so midline.py is usable without torch installed.
 
@@ -118,34 +132,56 @@ def _integral_sq_torch(coeffs_pred, coeffs_gt, c, d):
     return torch.clamp(torch.einsum('bi,bij,bj->b', r, G, r), min=0.0)
 
 
-def midline_loss_torch(pred, gt, degree=1, lambda_int=1.0, eps=1e-8):
-    """
-    Two-piece midline loss between predicted and ground-truth target vectors.
-
-    pred, gt : (B, degree+3) tensors = [coeffs (decreasing powers), xmin, xmax].
-               For degree 1: [a, b, xmin, xmax].
-
-    Returns (total, endpoint_term, integral_term) as scalar tensors (each
-    already meaned over the batch) so the two pieces can be logged separately.
-    """
-    import torch
-    cp, xminp, xmaxp = _split_vec_torch(pred, degree)
-    cg, xming, xmaxg = _split_vec_torch(gt, degree)
+def _section_loss_torch(pred_sec, gt_sec, degree, eps):
+    """Endpoint + union-integral terms for a single section. Returns (B,) each."""
+    cp, xminp, xmaxp = _split_vec_torch(pred_sec, degree)
+    cg, xming, xmaxg = _split_vec_torch(gt_sec, degree)
 
     # piece 1: matched extreme-point Euclidean distances
     yminp, ymaxp = _polyval_torch(cp, xminp), _polyval_torch(cp, xmaxp)
     yming, ymaxg = _polyval_torch(cg, xming), _polyval_torch(cg, xmaxg)
     left  = torch.sqrt((xminp - xming) ** 2 + (yminp - yming) ** 2 + eps)
     right = torch.sqrt((xmaxp - xmaxg) ** 2 + (ymaxp - ymaxg) ** 2 + eps)
-    endpoint_term = (left + right).mean()
+    endpoint = left + right
 
     # piece 2: integral over the union of definition intervals
     c = torch.minimum(xminp, xming)
     d = torch.maximum(xmaxp, xmaxg)
-    integral_term = _integral_sq_torch(cp, cg, c, d).mean()
+    integral = _integral_sq_torch(cp, cg, c, d)
+    return endpoint, integral
 
+
+def piecewise_loss_torch(pred, gt, spec, lambda_int=1.0, eps=1e-8):
+    """
+    Two-piece loss for a piecewise polynomial, summed over sections.
+
+    pred, gt : (B, spec.vector_length) tensors. Each section occupies a
+               contiguous slice [coeffs (decreasing powers), xmin, xmax].
+
+    total = sum_k endpoint_k + lambda_int * sum_k integral_k
+
+    Returns (total, endpoint_term, integral_term), each meaned over the batch.
+    For spec = PiecewiseSpec([1]) (the midline) this is exactly the original
+    two-piece midline loss.
+    """
+    endpoint_total = 0.0
+    integral_total = 0.0
+    for d, start, stop in spec.slices():
+        ep, integ = _section_loss_torch(pred[..., start:stop], gt[..., start:stop], d, eps)
+        endpoint_total = endpoint_total + ep
+        integral_total = integral_total + integ
+    endpoint_term = endpoint_total.mean()
+    integral_term = integral_total.mean()
     total = endpoint_term + lambda_int * integral_term
     return total, endpoint_term, integral_term
+
+
+def midline_loss_torch(pred, gt, degree=1, lambda_int=1.0, eps=1e-8):
+    """
+    Backward-compatible single-section wrapper around piecewise_loss_torch.
+    Equivalent to piecewise_loss_torch with spec = PiecewiseSpec([degree]).
+    """
+    return piecewise_loss_torch(pred, gt, PiecewiseSpec([degree]), lambda_int, eps)
 
 
 # ── label name handling ──────────────────────────────────────────────────────
@@ -230,6 +266,91 @@ class PolynomialWithLimits:
     def __repr__(self):
         return 'PolynomialWithLimits(coeffs={:}, xmin={:.2f}, xmax={:.2f})'.format(
             self.coeffs.tolist(), self.xmin, self.xmax
+        )
+
+
+# ── piecewise polynomial with limits ─────────────────────────────────────────
+#
+# A piecewise function is an ordered list of K sections; section k is a
+# PolynomialWithLimits of degree d_k on its own [xmin_k, xmax_k]. The flat
+# target vector is just the concatenation of each section's [coeffs, xmin, xmax]
+# (each section contributes d_k + 3 values). Consequently the midline — ONE
+# degree-1 section — keeps the exact same [a, b, xmin, xmax] layout as before,
+# so existing saved targets remain valid.
+#
+# A PiecewiseSpec records the per-section degrees and drives everything that
+# needs to know the structure: the network head size, how to split the flat
+# vector, the loss, and the metric.
+
+
+class PiecewiseSpec:
+    """Structure of a piecewise polynomial: a degree per section."""
+
+    def __init__(self, degrees):
+        self.degrees = [int(d) for d in degrees]
+
+    @property
+    def n_sections(self):
+        return len(self.degrees)
+
+    @property
+    def section_lengths(self):
+        """Flat-vector length contributed by each section: (d_k + 1) + 2."""
+        return [d + 3 for d in self.degrees]
+
+    @property
+    def vector_length(self):
+        return sum(self.section_lengths)
+
+    def slices(self):
+        """Yield (degree, start, stop) for each section in the flat vector."""
+        start = 0
+        for d, length in zip(self.degrees, self.section_lengths):
+            yield d, start, start + length
+            start += length
+
+    def __repr__(self):
+        return 'PiecewiseSpec(degrees={:})'.format(self.degrees)
+
+
+# the midline is the simplest realisation: one section, degree one
+MIDLINE_SPEC = PiecewiseSpec([1])
+
+
+class PiecewisePolynomial:
+    """Ordered list of PolynomialWithLimits sections."""
+
+    def __init__(self, sections):
+        self.sections = list(sections)
+
+    @property
+    def spec(self):
+        return PiecewiseSpec([s.degree for s in self.sections])
+
+    def __call__(self, x):
+        """Evaluate: use the first section whose [xmin, xmax] contains x."""
+        x = np.asarray(x, dtype=np.float64)
+        out = np.full(x.shape, np.nan, dtype=np.float64)
+        for s in self.sections:
+            m = (x >= s.xmin) & (x <= s.xmax) & np.isnan(out)
+            out[m] = s(x[m])
+        return out
+
+    def to_vector(self):
+        return np.concatenate([s.to_vector() for s in self.sections]).astype(np.float32)
+
+    @classmethod
+    def from_vector(cls, vec, spec):
+        vec = np.asarray(vec, dtype=np.float64)
+        sections = [
+            PolynomialWithLimits.from_vector(vec[start:stop], degree=d)
+            for d, start, stop in spec.slices()
+        ]
+        return cls(sections)
+
+    def __repr__(self):
+        return 'PiecewisePolynomial({:} sections, degrees={:})'.format(
+            len(self.sections), self.spec.degrees
         )
 
 

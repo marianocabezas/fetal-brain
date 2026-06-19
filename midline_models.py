@@ -2,11 +2,12 @@
 Two-head wrapper: segmentation (unchanged) + midline regression.
 
 Wraps any existing Segmenter so it keeps producing the same segmentation logits
-AND additionally predicts the midline target vector [a, b, xmin, xmax]
-(degree+3 values in general). The regression head reads the encoder features via
-a forward hook on the base network's target_layer(), so this works uniformly
-across FCN / DeepLab / LR-ASPP / UNet / SegFormer without touching any of their
-forward() methods.
+AND additionally predicts a piecewise-polynomial target vector. The structure is
+described by a PiecewiseSpec; the midline is the simplest case
+(MIDLINE_SPEC = one degree-1 section -> [a, b, xmin, xmax]). The regression head
+reads the encoder features via a forward hook on the base network's
+target_layer(), so this works uniformly across FCN / DeepLab / LR-ASPP / UNet /
+SegFormer without touching any of their forward() methods.
 
 By subclassing BaseModel it INHERITS the full training machinery
 (fit / mini_batch_loop / observe / save_model / load_model), which all run with
@@ -19,7 +20,7 @@ import torch
 import torch.nn as nn
 
 from base import BaseModel
-from midline import midline_loss_torch
+from midline import piecewise_loss_torch, PiecewiseSpec, MIDLINE_SPEC
 
 
 def _to_feature_map(out):
@@ -60,11 +61,11 @@ class MidlineHead(nn.Module):
 
 
 class MidlineSegmenter(BaseModel):
-    def __init__(self, base_net, degree=1, lambda_int=1.0, lambda_midline=1.0):
+    def __init__(self, base_net, spec=MIDLINE_SPEC, lambda_int=1.0, lambda_midline=1.0):
         super().__init__()
         self.base           = base_net
-        self.degree         = degree
-        self.n_mid          = degree + 3          # coeffs + xmin + xmax
+        self.spec           = spec
+        self.n_mid          = spec.vector_length     # total piecewise target size
         self.lambda_int     = lambda_int
         self.lambda_midline = lambda_midline
         self.device         = base_net.device
@@ -85,8 +86,8 @@ class MidlineSegmenter(BaseModel):
             {'name': 'xe',  'weight': 1.0,
              'f': lambda p, t: seg._cross_entropy(p[0], t[0])},
             {'name': 'mid', 'weight': self.lambda_midline,
-             'f': lambda p, t: midline_loss_torch(
-                 p[1], t[1], self.degree, self.lambda_int)[0]},
+             'f': lambda p, t: piecewise_loss_torch(
+                 p[1], t[1], self.spec, self.lambda_int)[0]},
         ]
         self.val_functions = [
             {'name': 'xe',  'weight': 1.0,
@@ -94,8 +95,8 @@ class MidlineSegmenter(BaseModel):
             {'name': 'dsc', 'weight': 1.0,
              'f': lambda p, t: seg._dsc_loss(p[0], t[0])},
             {'name': 'mid', 'weight': self.lambda_midline,
-             'f': lambda p, t: midline_loss_torch(
-                 p[1], t[1], self.degree, self.lambda_int)[0]},
+             'f': lambda p, t: piecewise_loss_torch(
+                 p[1], t[1], self.spec, self.lambda_int)[0]},
         ]
         self.acc_functions = {}
 

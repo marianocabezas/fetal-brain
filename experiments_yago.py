@@ -8,7 +8,7 @@ from time import strftime
 from torch.utils.data import DataLoader
 
 from datasets import FetalDataset
-from midline import PolynomialWithLimits, l2_functional_distance
+from midline import PiecewisePolynomial, piecewise_l2_distance
 
 
 class SegmentationExperiment:
@@ -72,7 +72,7 @@ class SegmentationExperiment:
         import sys, io
         model_path = os.path.join(
             self.weight_path,
-            '{:}-balanced_s{:05d}_f{:01d}.pt'.format(self.network_name, seed, f_i)
+            '{:}-balanced_s{:05d}_f{:01d}_e{:02d}.pt'.format(self.network_name, seed, f_i, self.epochs)
         )
         try:
             net.load_model(model_path)
@@ -125,13 +125,11 @@ class SegmentationExperiment:
                 mosaic_dsc.append(np.nanmean(dsc_k))
                 mosaic_class_dsc.append(dsc_k.tolist())
 
-                # midline: L2 functional distance between predicted and GT lines
+                # midline / piecewise: L2 functional distance, summed over sections
                 midline_pred = net.inference_midline(x_in)[0]
-                poly_pred = PolynomialWithLimits.from_vector(midline_pred, degree=net.degree)
-                poly_gt   = PolynomialWithLimits.from_vector(
-                    np.asarray(midline_gt), degree=net.degree
-                )
-                mosaic_midline.append(l2_functional_distance(poly_pred, poly_gt))
+                poly_pred = PiecewisePolynomial.from_vector(midline_pred, net.spec)
+                poly_gt   = PiecewisePolynomial.from_vector(np.asarray(midline_gt), net.spec)
+                mosaic_midline.append(piecewise_l2_distance(poly_pred, poly_gt))
 
                 if self.save_plots:
                     self._save_prediction_plot(input_mosaic, mask_i, pred_map, tst_i, seed, f_i)
@@ -217,7 +215,6 @@ class SegmentationExperiment:
 
                 print('   Testing <{:d} samples>'.format(len(test_set)))
                 mosaic_dsc, mosaic_class_dsc, mosaic_midline = self._compute_dsc(net, test_set, seed, f_i)
-                degree = net.degree
                 net = None
                 torch.cuda.empty_cache()
 
