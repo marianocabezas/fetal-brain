@@ -61,12 +61,17 @@ def piecewise_l2_distance(pw_p, pw_q, interval=None):
     matched sections (each over the GT section interval by default). For a
     single-section midline this equals l2_functional_distance.
     """
+    return float(sum(piecewise_l2_per_section(pw_p, pw_q, interval)))
+
+
+def piecewise_l2_per_section(pw_p, pw_q, interval=None):
+    """Per-section L2 functional distances (one value per section)."""
     if len(pw_p.sections) != len(pw_q.sections):
         raise ValueError('piecewise functions have different section counts')
-    return float(sum(
+    return [
         l2_functional_distance(sp, sq, interval)
         for sp, sq in zip(pw_p.sections, pw_q.sections)
-    ))
+    ]
 
 
 # torch version for use inside the combined loss (differentiable in coeffs and
@@ -284,10 +289,20 @@ class PolynomialWithLimits:
 
 
 class PiecewiseSpec:
-    """Structure of a piecewise polynomial: a degree per section."""
+    """
+    Structure of a set of polynomial sections: a degree (and optional name) per
+    section. Each section is an independent polynomial-with-limits; this
+    represents both the pieces of one piecewise function AND a set of distinct
+    annotated curves (e.g. midline + sylvian), since the maths is identical.
+    """
 
-    def __init__(self, degrees):
+    def __init__(self, degrees, names=None):
         self.degrees = [int(d) for d in degrees]
+        if names is None:
+            names = ['sec{:d}'.format(i) for i in range(len(self.degrees))]
+        if len(names) != len(self.degrees):
+            raise ValueError('names and degrees must have equal length')
+        self.names = list(names)
 
     @property
     def n_sections(self):
@@ -310,11 +325,15 @@ class PiecewiseSpec:
             start += length
 
     def __repr__(self):
-        return 'PiecewiseSpec(degrees={:})'.format(self.degrees)
+        return 'PiecewiseSpec(degrees={:}, names={:})'.format(self.degrees, self.names)
 
 
 # the midline is the simplest realisation: one section, degree one
-MIDLINE_SPEC = PiecewiseSpec([1])
+MIDLINE_SPEC = PiecewiseSpec([1], names=['midline'])
+
+# the full set of annotated curves predicted jointly: midline (deg 1) and
+# sylvian fissure / 'silvio' (deg 3). Each is an independent section.
+CURVE_SPEC = PiecewiseSpec([1, 3], names=['midline', 'sylvian'])
 
 
 class PiecewisePolynomial:
@@ -354,25 +373,21 @@ class PiecewisePolynomial:
         )
 
 
-# ── midline extraction ───────────────────────────────────────────────────────
+# ── curve extraction (fit a polynomial-with-limits to a binary mask) ─────────
 
-def midline_from_mask(binary_mask, degree=1):
+def fit_polynomial_to_mask(binary_mask, degree):
     """
-    Build a PolynomialWithLimits from a binary midline mask.
+    Fit a degree-`degree` PolynomialWithLimits to a binary curve mask.
 
-    Procedure (degree 1):
       1. skeletonise the binary mask
-      2. find the skeleton's leftmost x (xmin) and rightmost x (xmax)
-      3. take the skeleton point at xmin and the skeleton point at xmax
-         (averaging y if several skeleton pixels share that x)
-      4. the line is the one passing through those two endpoints, returned
-         in explicit form y = a*x + b on [xmin, xmax]
+      2. xmin / xmax = leftmost / rightmost skeleton x
+      3. degree 1  : the line through the skeleton points at xmin and xmax
+                     (endpoints, NOT a least-squares fit) — used for the midline
+         degree > 1 : least-squares y = poly(x) over all skeleton points
+                     (a cubic can't be pinned by two endpoints) — used e.g. for
+                     the sylvian fissure at degree 3
 
-    Note: per the spec the line is defined by the endpoints at xmin/xmax, NOT a
-    least-squares fit over all skeleton points.
-
-    Returns None if the mask is empty or degenerate (all skeleton pixels share
-    a single x, so no line in explicit y=ax+b form exists).
+    Returns None if the mask is empty or degenerate (single x column).
     """
     mask = np.asarray(binary_mask) > 0
     if not mask.any():
@@ -386,20 +401,23 @@ def midline_from_mask(binary_mask, degree=1):
     xmin = int(xs.min())
     xmax = int(xs.max())
     if xmin == xmax:
-        # vertical / single-column skeleton: not expressible as y = a*x + b
         return None
 
-    y_at_xmin = float(ys[xs == xmin].mean())
-    y_at_xmax = float(ys[xs == xmax].mean())
-
     if degree == 1:
+        y_at_xmin = float(ys[xs == xmin].mean())
+        y_at_xmax = float(ys[xs == xmax].mean())
         a = (y_at_xmax - y_at_xmin) / (xmax - xmin)
         b = y_at_xmin - a * xmin
         coeffs = [a, b]
     else:
-        # placeholder for future higher-degree structures: fit through the
-        # skeleton points constrained to the endpoint x-range.
+        if xs.size <= degree:
+            return None  # not enough points to fit this degree
         coeffs = np.polyfit(xs, ys, degree)
 
     return PolynomialWithLimits(coeffs, xmin, xmax)
+
+
+def midline_from_mask(binary_mask, degree=1):
+    """Degree-1 convenience wrapper around fit_polynomial_to_mask (the midline)."""
+    return fit_polynomial_to_mask(binary_mask, degree)
 

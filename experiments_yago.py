@@ -8,7 +8,7 @@ from time import strftime
 from torch.utils.data import DataLoader
 
 from datasets import FetalDataset
-from midline import PiecewisePolynomial, piecewise_l2_distance
+from midline import PiecewisePolynomial, piecewise_l2_per_section
 
 
 class SegmentationExperiment:
@@ -104,13 +104,13 @@ class SegmentationExperiment:
 
     def _compute_dsc(self, net, testing_set, seed, f_i):
         """Run inference on the test set, save plots if asked, return DSC and
-        the midline L2 functional distance (predicted vs GT line over the GT
-        interval, in pixel units)."""
-        mosaic_dsc, mosaic_class_dsc, mosaic_midline = [], [], []
+        the per-curve L2 functional distances (one list per section of net.spec,
+        in pixel units)."""
+        mosaic_dsc, mosaic_class_dsc, mosaic_curves = [], [], []
         net.eval()
         with torch.no_grad():
             for tst_i, (input_mosaic, target_i) in enumerate(testing_set):
-                mask_i, midline_gt = target_i          # tuple target (seg, midline)
+                mask_i, curves_gt = target_i           # tuple target (seg, curves)
                 x_in = np.expand_dims(input_mosaic.astype(np.float32), axis=0)
                 pred_map = net.inference(x_in)[0]
                 pred_y = np.argmax(pred_map, axis=0).astype(np.uint8)
@@ -125,15 +125,15 @@ class SegmentationExperiment:
                 mosaic_dsc.append(np.nanmean(dsc_k))
                 mosaic_class_dsc.append(dsc_k.tolist())
 
-                # midline / piecewise: L2 functional distance, summed over sections
-                midline_pred = net.inference_midline(x_in)[0]
-                poly_pred = PiecewisePolynomial.from_vector(midline_pred, net.spec)
-                poly_gt   = PiecewisePolynomial.from_vector(np.asarray(midline_gt), net.spec)
-                mosaic_midline.append(piecewise_l2_distance(poly_pred, poly_gt))
+                # per-curve L2 functional distance (midline, sylvian, ...)
+                curves_pred = net.inference_midline(x_in)[0]
+                poly_pred = PiecewisePolynomial.from_vector(curves_pred, net.spec)
+                poly_gt   = PiecewisePolynomial.from_vector(np.asarray(curves_gt), net.spec)
+                mosaic_curves.append(piecewise_l2_per_section(poly_pred, poly_gt))
 
                 if self.save_plots:
                     self._save_prediction_plot(input_mosaic, mask_i, pred_map, tst_i, seed, f_i)
-        return mosaic_dsc, mosaic_class_dsc, mosaic_midline
+        return mosaic_dsc, mosaic_class_dsc, mosaic_curves
 
     def _print_fold_header(self, f_i, n_param, n_train, n_val, n_test):
         print('   Fold {:02d}/{:02d} ({:} - [{:,} parameters])'.format(
@@ -214,21 +214,23 @@ class SegmentationExperiment:
                 self._train_or_load(net, seed, f_i, training_loader, validation_loader)
 
                 print('   Testing <{:d} samples>'.format(len(test_set)))
-                mosaic_dsc, mosaic_class_dsc, mosaic_midline = self._compute_dsc(net, test_set, seed, f_i)
+                mosaic_dsc, mosaic_class_dsc, mosaic_curves = self._compute_dsc(net, test_set, seed, f_i)
+                curve_names = net.spec.names
                 net = None
                 torch.cuda.empty_cache()
 
                 dsc          = np.nanmean(mosaic_dsc)
                 class_dsc    = np.nanmean(mosaic_class_dsc, axis=0)
-                midline_dist = np.nanmean(mosaic_midline)
+                curve_dist   = np.nanmean(mosaic_curves, axis=0)   # one per structure
                 self._print_fold_results(f_i, seed, test_n, len(seeds), dsc, class_dsc)
-                print('   Fold {:02d}/{:02d} Midline L2 (seed {:05d}) [{:02d}/{:02d}] {:.3f}'.format(
-                    f_i + 1, self.n_folds, seed, test_n + 1, len(seeds), midline_dist
+                curve_s = ', '.join('{:} {:.3f}'.format(n, v) for n, v in zip(curve_names, curve_dist))
+                print('   Fold {:02d}/{:02d} Curve L2 (seed {:05d}) [{:02d}/{:02d}] {:}'.format(
+                    f_i + 1, self.n_folds, seed, test_n + 1, len(seeds), curve_s
                 ))
 
-                record = {'seed': seed, 'fold': f_i + 1, 'mean_dsc': dsc,
-                          'midline_l2': midline_dist}
+                record = {'seed': seed, 'fold': f_i + 1, 'mean_dsc': dsc}
                 record.update({'{:}_dsc'.format(k): v for k, v in zip(self.classes, class_dsc)})
+                record.update({'{:}_l2'.format(n): v for n, v in zip(curve_names, curve_dist)})
                 records.append(record)
 
                 self._build_dataframe(records).to_csv(

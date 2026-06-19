@@ -7,7 +7,7 @@ from shutil import copyfile
 from functools import partial
 from scipy.ndimage import binary_fill_holes
 from utils import load_xcf
-from midline import midline_from_mask, MIDLINE_SPEC
+from midline import fit_polynomial_to_mask, CURVE_SPEC
 from midline_models import MidlineSegmenter
 
 from experiments_yago import SegmentationExperiment
@@ -41,28 +41,42 @@ def build_segmentation(layer_dict, layer_list):
     ], axis=0)
 
 
-def build_midline(layer_dict, midline_key='midline'):
-    """
-    Extract the midline as a degree-1 polynomial-with-limits target vector
-    [a, b, xmin, xmax] from the 'midline' layer's binary (alpha) mask.
+# Curve structures predicted jointly. Each maps a CURVE_SPEC section (by name)
+# to its XCF layer (lowercased key in layer_dict) and fit degree. Order MUST
+# match CURVE_SPEC so the concatenated vector lines up with the spec slices.
+CURVE_STRUCTURES = [
+    {'name': 'midline', 'layer': 'midline', 'degree': 1},
+    {'name': 'sylvian', 'layer': 'silvio',  'degree': 3},
+]
 
-    The midline is expected in every image; raise if its layer is missing or
-    its mask is empty/degenerate so a wrongly-named or empty layer is reported
+
+def build_curves(layer_dict):
+    """
+    Extract every curve in CURVE_STRUCTURES and return the concatenated target
+    vector laid out per CURVE_SPEC (midline 4 values + sylvian 6 values = 10).
+
+    Each curve is expected in every image; raise if a layer is missing or its
+    mask is empty/degenerate so a wrongly-named or empty layer is reported
     rather than silently producing a bad target.
     """
-    if midline_key not in layer_dict:
-        raise ValueError(
-            "No '{:}' layer found. Present layers: {:}".format(
-                midline_key, sorted(layer_dict.keys())
+    vectors = []
+    for s in CURVE_STRUCTURES:
+        key = s['layer']
+        if key not in layer_dict:
+            raise ValueError(
+                "No '{:}' layer (for '{:}'). Present layers: {:}".format(
+                    key, s['name'], sorted(layer_dict.keys())
+                )
             )
-        )
-    mask = np.array(layer_dict[midline_key])[..., -1] > 0
-    poly = midline_from_mask(mask, degree=1)
-    if poly is None:
-        raise ValueError(
-            "'{:}' layer is empty or degenerate (no y=ax+b line).".format(midline_key)
-        )
-    return poly.to_vector()
+        mask = np.array(layer_dict[key])[..., -1] > 0
+        poly = fit_polynomial_to_mask(mask, degree=s['degree'])
+        if poly is None:
+            raise ValueError(
+                "'{:}' layer ('{:}') is empty or degenerate for a degree-{:d} "
+                "fit.".format(key, s['name'], s['degree'])
+            )
+        vectors.append(poly.to_vector())
+    return np.concatenate(vectors).astype(np.float32)
 
 
 def save_debug_plot(dcm_image, final_seg, subj_code, debug_path):
@@ -88,7 +102,7 @@ def process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose=F
       - Load XCF layers and DICOM image
       - Build segmentation mask
       - Save segmentation PNG, midline sidecar (.npy) and copy DICOM to out_path
-    Returns (subj_code, dcm_image, pixel_array, final_seg, midline, layer_keys)
+    Returns (subj_code, dcm_image, pixel_array, final_seg, curves, layer_keys)
     or None on failure.
     """
     f_split   = xcf_f.split('.')
@@ -105,16 +119,16 @@ def process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose=F
         ds        = dicom.dcmread(os.path.join(dicom_path, dicom_f))
         dcm_image = np.mean(ds.pixel_array, axis=-1)
         final_seg = build_segmentation(layer_dict, layer_list)
-        midline   = build_midline(layer_dict)
+        curves    = build_curves(layer_dict)
 
         os.makedirs(out_path, exist_ok=True)
         skio.imsave(os.path.join(out_path, subj_code + '.png'), final_seg.astype(np.uint8))
-        np.save(os.path.join(out_path, subj_code + '_midline.npy'), midline)
+        np.save(os.path.join(out_path, subj_code + '_curves.npy'), curves)
         copyfile(os.path.join(dicom_path, dicom_f), os.path.join(out_path, dicom_f))
 
         if verbose:
             print('{:<6}'.format(subj_code), sorted(layer_dict.keys()), final_seg.shape, dcm_image.shape)
-        return subj_code, dcm_image, ds.pixel_array, final_seg, midline, sorted(layer_dict.keys())
+        return subj_code, dcm_image, ds.pixel_array, final_seg, curves, sorted(layer_dict.keys())
 
     except (IndexError, FileNotFoundError) as e:
         print('ERROR loading', subj_code, ':', e)
@@ -124,16 +138,16 @@ def process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose=F
 def load_processed_subject(subj_code, out_path, verbose=False):
     """
     Load an already-processed subject directly from out_path (skip XCF processing).
-    Returns (subj_code, dcm_image, pixel_array, final_seg, midline) or None on failure.
+    Returns (subj_code, dcm_image, pixel_array, final_seg, curves) or None on failure.
     """
     try:
         final_seg = skio.imread(os.path.join(out_path, subj_code + '.png'))
-        midline   = np.load(os.path.join(out_path, subj_code + '_midline.npy'))
+        curves    = np.load(os.path.join(out_path, subj_code + '_curves.npy'))
         ds        = dicom.dcmread(os.path.join(out_path, subj_code + '.dcm'))
         dcm_image = np.mean(ds.pixel_array, axis=-1)
         if verbose:
             print('{:<6} loaded from processed'.format(subj_code))
-        return subj_code, dcm_image, ds.pixel_array, final_seg, midline
+        return subj_code, dcm_image, ds.pixel_array, final_seg, curves
 
     except FileNotFoundError as e:
         print('ERROR loading processed', subj_code, ':', e)
@@ -163,14 +177,14 @@ def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, v
         if mode == 'full':
             result = process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose)
             if result is not None:
-                subj_code, dcm_image, pixel_array, final_seg, midline, layer_keys = result
+                subj_code, dcm_image, pixel_array, final_seg, curves, layer_keys = result
                 labels += layer_keys
-                global_dict.setdefault(sub, []).append((pixel_array, final_seg, midline))
+                global_dict.setdefault(sub, []).append((pixel_array, final_seg, curves))
         elif mode == 'load_only':
             result = load_processed_subject(subj_code, out_path, verbose)
             if result is not None:
-                subj_code, dcm_image, pixel_array, final_seg, midline = result
-                global_dict.setdefault(sub, []).append((pixel_array, final_seg, midline))
+                subj_code, dcm_image, pixel_array, final_seg, curves = result
+                global_dict.setdefault(sub, []).append((pixel_array, final_seg, curves))
         else:
             raise ValueError("mode must be 'full' or 'load_only', got '{:}'".format(mode))
 
@@ -216,7 +230,7 @@ if __name__ == '__main__':
         # relative to the endpoint term (different units).
         def network_f(_base_f=base_network_f, **kwargs):
             return MidlineSegmenter(
-                _base_f(**kwargs), spec=MIDLINE_SPEC, lambda_int=0.01, lambda_midline=1.0
+                _base_f(**kwargs), spec=CURVE_SPEC, lambda_int=0.01, lambda_midline=1.0
             )
 
         print('[{:}] Starting {:}'.format(strftime("%d/%m/%Y - %H:%M:%S"), display_name))
