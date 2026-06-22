@@ -155,27 +155,27 @@ def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, v
 
 if __name__ == '__main__':
 
-    #xcf_path, dicom_path, out_path, debug_path = 'Anotacions 2026/', 'Cerebel_dicom_anonim/', 'ProcessedData/', 'outDebug/'
-    xcf_path, dicom_path, out_path, debug_path = 'Anotacions 2026/', 'Cerebel_dicom_anonim/', '/home/yago/Yago Lab Dropbox/medicalImaging/experiments/ProcessedData/', 'outDebug/'
+    xcf_path, dicom_path, debug_path = 'Anotacions 2026/', 'Cerebel_dicom_anonim/', 'outDebug/'
+    processed_path = 'ProcessedData/'   # local — images, DICOMs, weights
+    results_path   = '/home/yago/Yago Lab Dropbox/medicalImaging/experiments/'  # Dropbox — CSVs only
     layer_list  = ['cavum', 'cerebel', 'cisterna magna', 'plec nucal', 'midline', 'silvio']
     layer_names = ['cavum', 'cerebellum', 'cisterna magna', 'nuchal fold', 'midline', 'sylvian']
     mode    = 'load_only'  # 'full'
     classes = ['background'] + layer_names[:-2]
 
-    global_dict = run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, verbose=False)
+    global_dict = run_pipeline(mode, xcf_path, dicom_path, processed_path, debug_path, layer_list, verbose=False)
 
-    # Each entry: (network_name, display_name, network_f)
     networks = [
-        ('fcn-resnet101',     'FCN ResNet101',     partial(FCN_ResNet101,        lr=1e-4, pretrained=True)),
-        ('deeplab-resnet101', 'DeepLab ResNet101', partial(DeeplabV3_ResNet101,  lr=1e-4, pretrained=True)),
-        ('fcn-resnet50',      'FCN ResNet50',      partial(FCN_ResNet50,         lr=1e-4, pretrained=True)),
-        ('deeplab-resnet50',  'DeepLab ResNet50',  partial(DeeplabV3_ResNet50,   lr=1e-4, pretrained=True)),
-        ('deeplab-mobilenet', 'DeepLab MobileNet', partial(DeeplabV3_MobileNet,  lr=1e-4, pretrained=True)),
-        ('lraspp-mobilenet',  'LRASPP MobileNet',  partial(LRASPP_MobileNet,     lr=1e-4, pretrained=True)),
-        ('unet2d',            'UNet 2D',           partial(Unet2D,               lr=1e-4)),
-        ('segformer-b2',      'SegFormer B2',      partial(SegFormer,           lr=1e-4)),
-        ('segformer-b4', 'SegFormer B4', partial(SegFormer, backbone='nvidia/mit-b4', lr=1e-4)),
-        ('segformer-b5', 'SegFormer B5', partial(SegFormer, backbone='nvidia/mit-b5', lr=1e-4)),
+        #('fcn-resnet101',     'FCN ResNet101',     partial(FCN_ResNet101,        lr=1e-4, pretrained=True)),
+        #('deeplab-resnet101', 'DeepLab ResNet101', partial(DeeplabV3_ResNet101,  lr=1e-4, pretrained=True)),
+        #('fcn-resnet50',      'FCN ResNet50',      partial(FCN_ResNet50,         lr=1e-4, pretrained=True)),
+        #('deeplab-resnet50',  'DeepLab ResNet50',  partial(DeeplabV3_ResNet50,   lr=1e-4, pretrained=True)),
+        #('deeplab-mobilenet', 'DeepLab MobileNet', partial(DeeplabV3_MobileNet,  lr=1e-4, pretrained=True)),
+        #('lraspp-mobilenet',  'LRASPP MobileNet',  partial(LRASPP_MobileNet,     lr=1e-4, pretrained=True)),
+        #('unet2d',            'UNet 2D',           partial(Unet2D,               lr=1e-4)),
+        ('segformer-b2',      'SegFormer B2',      partial(SegFormer,            lr=1e-4)),
+        ('segformer-b4',      'SegFormer B4',      partial(SegFormer, backbone='nvidia/mit-b4', lr=1e-4)),
+        ('segformer-b5',      'SegFormer B5',      partial(SegFormer, backbone='nvidia/mit-b5', lr=1e-4)),
     ]
 
     all_results = []
@@ -185,13 +185,14 @@ if __name__ == '__main__':
         t_start = time()
         exp = SegmentationExperiment(
             net_name, display_name, 'fetal us segmentation', network_f, global_dict,
-            os.path.join(out_path, 'Weights'), os.path.join(out_path, 'Predictions', net_name),
-            classes, n_inputs=3, n_classes=len(classes), epochs=20, patience=5,
+            os.path.join(processed_path, 'Weights'),
+            os.path.join(processed_path, 'Predictions', net_name),
+            classes, n_inputs=3, n_classes=len(classes), epochs = 30, patience=5,
             train_batch=1, test_batch=1, n_seeds=5, verbose=1, save_plots=False,
         )
         _, _, results_df = exp.run(master_seed=42)
         results_df['network'] = display_name
-        exp.save_results(results_df, os.path.join(out_path, '{:}_results.csv'.format(net_name)))
+        exp.save_results(results_df, os.path.join(results_path, '{:}_results.csv'.format(net_name)))
         all_results.append(results_df)
         torch.cuda.empty_cache()
         elapsed = time() - t_start
@@ -205,7 +206,7 @@ if __name__ == '__main__':
     ))
 
     comparison_df = pd.concat(all_results, ignore_index=True)
-    comparison_df.to_csv(os.path.join(out_path, 'comparison_results.csv'), index=False)
+    comparison_df.to_csv(os.path.join(results_path, 'comparison_results.csv'), index=False)
     print('\n── Comparison summary (global mean row per network) ──')
     summary = comparison_df[(comparison_df['fold'] == 'mean') & (comparison_df['seed'] == 'all')]
     print(summary.set_index('network').drop(columns=['seed', 'fold']).to_string())

@@ -8,6 +8,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from base import BaseModel, Autoencoder2D
+from transformers import SegformerForSemanticSegmentation
+
 
 
 class Classifier(BaseModel):
@@ -417,7 +419,6 @@ class SegFormer(Segmenter):
     def __init__(self, n_inputs, n_outputs, backbone='nvidia/mit-b2', lr=1e-3,
                  device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"), verbose=True):
         super().__init__(n_outputs)
-        from transformers import SegformerForSemanticSegmentation
 
         self.channels, self.lr, self.device = n_inputs, lr, device
 
@@ -435,6 +436,7 @@ class SegFormer(Segmenter):
             )
 
         self.model.to(device)
+        self.model.gradient_checkpointing_enable()
         self.optimizer_alg = torch.optim.Adam(filter(lambda p: p.requires_grad, self.parameters()), lr=lr)
         _make_verbose_print(self, self.train_functions, self.val_functions, device, verbose)
 

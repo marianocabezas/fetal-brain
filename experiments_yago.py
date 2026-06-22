@@ -68,10 +68,7 @@ class SegmentationExperiment:
     def _train_or_load(self, net, seed, f_i, training_loader, validation_loader):
         """Load weights from disk if available, otherwise train and save."""
         import sys, io
-        model_path = os.path.join(
-            self.weight_path,
-            '{:}-balanced_s{:05d}_f{:01d}.pt'.format(self.network_name, seed, f_i)
-        )
+        model_path = os.model_path = os.path.join(self.weight_path, '{:}-balanced_s{:05d}_f{:01d}_e{:02d}.pt'.format(self.network_name, seed, f_i, self.epochs))
         try:
             net.load_model(model_path)
         except IOError:
@@ -79,9 +76,18 @@ class SegmentationExperiment:
             sys.stdout = io.StringIO()
             try:
                 net.fit(training_loader, validation_loader, epochs=self.epochs, patience=self.patience)
+            except torch.cuda.OutOfMemoryError:
+                sys.stdout = sys.__stdout__
+                print('OOM: {:} skipped'.format(self.network_name))
+                torch.cuda.empty_cache()
+                return
             finally:
                 sys.stdout = sys.__stdout__
             net.save_model(model_path)
+
+
+
+
 
     def _save_prediction_plot(self, input_mosaic, mask_i, pred_map, tst_i, seed, f_i):
         """Save a side-by-side ground truth vs prediction plot to maps_path."""
