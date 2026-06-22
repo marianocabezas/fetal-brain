@@ -7,6 +7,8 @@ from shutil import copyfile
 from functools import partial
 from scipy.ndimage import binary_fill_holes
 from utils import load_xcf
+from midline import fit_polynomial_to_mask, CURVE_SPEC
+from midline_models import MidlineSegmenter
 
 from experiments_yago import SegmentationExperiment
 from time import time, strftime
@@ -39,6 +41,44 @@ def build_segmentation(layer_dict, layer_list):
     ], axis=0)
 
 
+# Curve structures predicted jointly. Each maps a CURVE_SPEC section (by name)
+# to its XCF layer (lowercased key in layer_dict) and fit degree. Order MUST
+# match CURVE_SPEC so the concatenated vector lines up with the spec slices.
+CURVE_STRUCTURES = [
+    {'name': 'midline', 'layer': 'midline', 'degree': 1},
+    {'name': 'sylvian', 'layer': 'silvio',  'degree': 3},
+]
+
+
+def build_curves(layer_dict):
+    """
+    Extract every curve in CURVE_STRUCTURES and return the concatenated target
+    vector laid out per CURVE_SPEC (midline 4 values + sylvian 6 values = 10).
+
+    Each curve is expected in every image; raise if a layer is missing or its
+    mask is empty/degenerate so a wrongly-named or empty layer is reported
+    rather than silently producing a bad target.
+    """
+    vectors = []
+    for s in CURVE_STRUCTURES:
+        key = s['layer']
+        if key not in layer_dict:
+            raise ValueError(
+                "No '{:}' layer (for '{:}'). Present layers: {:}".format(
+                    key, s['name'], sorted(layer_dict.keys())
+                )
+            )
+        mask = np.array(layer_dict[key])[..., -1] > 0
+        poly = fit_polynomial_to_mask(mask, degree=s['degree'])
+        if poly is None:
+            raise ValueError(
+                "'{:}' layer ('{:}') is empty or degenerate for a degree-{:d} "
+                "fit.".format(key, s['name'], s['degree'])
+            )
+        vectors.append(poly.to_vector())
+    return np.concatenate(vectors).astype(np.float32)
+
+
 def save_debug_plot(dcm_image, final_seg, subj_code, debug_path):
     """Save a side-by-side debug plot of the DICOM image and segmentation overlay."""
     os.makedirs(debug_path, exist_ok=True)
@@ -61,8 +101,9 @@ def process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose=F
     Process a single XCF/DICOM pair:
       - Load XCF layers and DICOM image
       - Build segmentation mask
-      - Save segmentation PNG and copy DICOM to out_path
-    Returns (subj_code, dcm_image, pixel_array, final_seg, layer_keys) or None on failure.
+      - Save segmentation PNG, midline sidecar (.npy) and copy DICOM to out_path
+    Returns (subj_code, dcm_image, pixel_array, final_seg, curves, layer_keys)
+    or None on failure.
     """
     f_split   = xcf_f.split('.')
     subj_code = '.'.join(f_split[:-1])
@@ -78,14 +119,16 @@ def process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose=F
         ds        = dicom.dcmread(os.path.join(dicom_path, dicom_f))
         dcm_image = np.mean(ds.pixel_array, axis=-1)
         final_seg = build_segmentation(layer_dict, layer_list)
+        curves    = build_curves(layer_dict)
 
         os.makedirs(out_path, exist_ok=True)
         skio.imsave(os.path.join(out_path, subj_code + '.png'), final_seg.astype(np.uint8))
+        np.save(os.path.join(out_path, subj_code + '_curves.npy'), curves)
         copyfile(os.path.join(dicom_path, dicom_f), os.path.join(out_path, dicom_f))
 
         if verbose:
             print('{:<6}'.format(subj_code), sorted(layer_dict.keys()), final_seg.shape, dcm_image.shape)
-        return subj_code, dcm_image, ds.pixel_array, final_seg, sorted(layer_dict.keys())
+        return subj_code, dcm_image, ds.pixel_array, final_seg, curves, sorted(layer_dict.keys())
 
     except (IndexError, FileNotFoundError) as e:
         print('ERROR loading', subj_code, ':', e)
@@ -95,15 +138,16 @@ def process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose=F
 def load_processed_subject(subj_code, out_path, verbose=False):
     """
     Load an already-processed subject directly from out_path (skip XCF processing).
-    Returns (subj_code, dcm_image, pixel_array, final_seg) or None on failure.
+    Returns (subj_code, dcm_image, pixel_array, final_seg, curves) or None on failure.
     """
     try:
         final_seg = skio.imread(os.path.join(out_path, subj_code + '.png'))
+        curves    = np.load(os.path.join(out_path, subj_code + '_curves.npy'))
         ds        = dicom.dcmread(os.path.join(out_path, subj_code + '.dcm'))
         dcm_image = np.mean(ds.pixel_array, axis=-1)
         if verbose:
             print('{:<6} loaded from processed'.format(subj_code))
-        return subj_code, dcm_image, ds.pixel_array, final_seg
+        return subj_code, dcm_image, ds.pixel_array, final_seg, curves
 
     except FileNotFoundError as e:
         print('ERROR loading processed', subj_code, ':', e)
@@ -133,14 +177,14 @@ def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, v
         if mode == 'full':
             result = process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose)
             if result is not None:
-                subj_code, dcm_image, pixel_array, final_seg, layer_keys = result
+                subj_code, dcm_image, pixel_array, final_seg, curves, layer_keys = result
                 labels += layer_keys
-                global_dict.setdefault(sub, []).append((pixel_array, final_seg))
+                global_dict.setdefault(sub, []).append((pixel_array, final_seg, curves))
         elif mode == 'load_only':
             result = load_processed_subject(subj_code, out_path, verbose)
             if result is not None:
-                subj_code, dcm_image, pixel_array, final_seg = result
-                global_dict.setdefault(sub, []).append((pixel_array, final_seg))
+                subj_code, dcm_image, pixel_array, final_seg, curves = result
+                global_dict.setdefault(sub, []).append((pixel_array, final_seg, curves))
         else:
             raise ValueError("mode must be 'full' or 'load_only', got '{:}'".format(mode))
 
@@ -180,7 +224,15 @@ if __name__ == '__main__':
 
     all_results = []
     t_total_start = time()
-    for net_name, display_name, network_f in networks:
+    for net_name, display_name, base_network_f in networks:
+        # wrap the base segmenter factory so each built net is a two-head
+        # (segmentation + midline) model; degree 1, integral term down-weighted
+        # relative to the endpoint term (different units).
+        def network_f(_base_f=base_network_f, **kwargs):
+            return MidlineSegmenter(
+                _base_f(**kwargs), spec=CURVE_SPEC, lambda_int=0.01, lambda_midline=1.0
+            )
+
         print('[{:}] Starting {:}'.format(strftime("%d/%m/%Y - %H:%M:%S"), display_name))
         t_start = time()
         exp = SegmentationExperiment(
