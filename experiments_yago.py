@@ -70,7 +70,7 @@ class SegmentationExperiment:
     def _train_or_load(self, net, seed, f_i, training_loader, validation_loader):
         """Load weights from disk if available, otherwise train and save."""
         import sys, io
-        model_path = os.model_path = os.path.join(self.weight_path, '{:}-balanced_s{:05d}_f{:01d}_e{:02d}.pt'.format(self.network_name, seed, f_i, self.epochs))
+        model_path = os.path.join(self.weight_path, '{:}-balanced_s{:05d}_f{:01d}_e{:02d}.pt'.format(self.network_name, seed, f_i, self.epochs))
         try:
             net.load_model(model_path)
         except IOError:

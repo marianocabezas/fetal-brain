@@ -7,8 +7,15 @@ from shutil import copyfile
 from functools import partial
 from scipy.ndimage import binary_fill_holes
 from utils import load_xcf
-from midline import fit_polynomial_to_mask, CURVE_SPEC
+from midline import fit_polynomial_to_mask, MIDLINE_SPEC, CURVE_SPEC
 from midline_models import MidlineSegmenter
+
+# ── curve prediction scope ────────────────────────────────────────────────────
+# Switch here to control which structures are predicted. Both CURVE_STRUCTURES
+# and the network wrapper use ACTIVE_SPEC — this is the only line to change.
+#   MIDLINE_SPEC  — midline only        (4-value target)
+#   CURVE_SPEC    — midline + sylvian   (10-value target)
+ACTIVE_SPEC = MIDLINE_SPEC
 
 from experiments_yago import SegmentationExperiment
 from time import time, strftime
@@ -41,12 +48,14 @@ def build_segmentation(layer_dict, layer_list):
     ], axis=0)
 
 
-# Curve structures predicted jointly. Each maps a CURVE_SPEC section (by name)
-# to its XCF layer (lowercased key in layer_dict) and fit degree. Order MUST
-# match CURVE_SPEC so the concatenated vector lines up with the spec slices.
-CURVE_STRUCTURES = [
+# All known curve structures; filtered by ACTIVE_SPEC to build CURVE_STRUCTURES.
+# Each entry must correspond to one section of its spec, in the same order.
+ALL_CURVE_STRUCTURES = [
     {'name': 'midline', 'layer': 'midline', 'degree': 1},
     {'name': 'sylvian', 'layer': 'silvio',  'degree': 3},
+]
+CURVE_STRUCTURES = [
+    s for s in ALL_CURVE_STRUCTURES if s['name'] in ACTIVE_SPEC.names
 ]
 
 
@@ -211,14 +220,14 @@ if __name__ == '__main__':
 
     networks = [
         #('fcn-resnet101',     'FCN ResNet101',     partial(FCN_ResNet101,        lr=1e-4, pretrained=True)),
-        #('deeplab-resnet101', 'DeepLab ResNet101', partial(DeeplabV3_ResNet101,  lr=1e-4, pretrained=True)),
-        #('fcn-resnet50',      'FCN ResNet50',      partial(FCN_ResNet50,         lr=1e-4, pretrained=True)),
+        ('deeplab-resnet101', 'DeepLab ResNet101', partial(DeeplabV3_ResNet101,  lr=1e-4, pretrained=True)),
+        ('fcn-resnet50',      'FCN ResNet50',      partial(FCN_ResNet50,         lr=1e-4, pretrained=True)),
         #('deeplab-resnet50',  'DeepLab ResNet50',  partial(DeeplabV3_ResNet50,   lr=1e-4, pretrained=True)),
         #('deeplab-mobilenet', 'DeepLab MobileNet', partial(DeeplabV3_MobileNet,  lr=1e-4, pretrained=True)),
         #('lraspp-mobilenet',  'LRASPP MobileNet',  partial(LRASPP_MobileNet,     lr=1e-4, pretrained=True)),
         #('unet2d',            'UNet 2D',           partial(Unet2D,               lr=1e-4)),
-        ('segformer-b2',      'SegFormer B2',      partial(SegFormer,            lr=1e-4)),
-        ('segformer-b4',      'SegFormer B4',      partial(SegFormer, backbone='nvidia/mit-b4', lr=1e-4)),
+        #('segformer-b2',      'SegFormer B2',      partial(SegFormer,            lr=1e-4)),
+        #('segformer-b4',      'SegFormer B4',      partial(SegFormer, backbone='nvidia/mit-b4', lr=1e-4)),
         ('segformer-b5',      'SegFormer B5',      partial(SegFormer, backbone='nvidia/mit-b5', lr=1e-4)),
     ]
 
@@ -230,7 +239,7 @@ if __name__ == '__main__':
         # relative to the endpoint term (different units).
         def network_f(_base_f=base_network_f, **kwargs):
             return MidlineSegmenter(
-                _base_f(**kwargs), spec=CURVE_SPEC, lambda_int=0.01, lambda_midline=1.0
+                _base_f(**kwargs), spec=ACTIVE_SPEC, lambda_int = 0.01, lambda_midline = 1.0
             )
 
         print('[{:}] Starting {:}'.format(strftime("%d/%m/%Y - %H:%M:%S"), display_name))
@@ -239,7 +248,7 @@ if __name__ == '__main__':
             net_name, display_name, 'fetal us segmentation', network_f, global_dict,
             os.path.join(processed_path, 'Weights'),
             os.path.join(processed_path, 'Predictions', net_name),
-            classes, n_inputs=3, n_classes=len(classes), epochs = 30, patience=5,
+            classes, n_inputs=3, n_classes=len(classes), epochs = 10, patience=5,
             train_batch=1, test_batch=1, n_seeds=5, verbose=1, save_plots=False,
         )
         _, _, results_df = exp.run(master_seed=42)

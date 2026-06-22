@@ -375,7 +375,7 @@ class PiecewisePolynomial:
 
 # ── curve extraction (fit a polynomial-with-limits to a binary mask) ─────────
 
-def fit_polynomial_to_mask(binary_mask, degree):
+def fit_polynomial_to_mask(binary_mask, degree, normalize=True):
     """
     Fit a degree-`degree` PolynomialWithLimits to a binary curve mask.
 
@@ -387,34 +387,47 @@ def fit_polynomial_to_mask(binary_mask, degree):
                      (a cubic can't be pinned by two endpoints) — used e.g. for
                      the sylvian fissure at degree 3
 
+    If normalize is True the coordinates are mapped to the unit square
+    (x -> x / W, y -> y / H) before fitting, so the coefficients and limits are
+    all O(1). This keeps the curve loss the same order of magnitude as the
+    segmentation loss; without it the raw-pixel integral term (~1e3) swamps the
+    cross-entropy (~1) and segmentation never trains. All downstream code is
+    unit-agnostic, so the only requirement is that the SAME normalisation is
+    used everywhere — i.e. regenerate the sidecars after changing this flag.
+
     Returns None if the mask is empty or degenerate (single x column).
     """
     mask = np.asarray(binary_mask) > 0
     if not mask.any():
         return None
+    height, width = mask.shape[:2]
 
     skel = skeletonize(mask)
     ys, xs = np.nonzero(skel)
     if xs.size == 0:
         return None
 
-    xmin = int(xs.min())
-    xmax = int(xs.max())
-    if xmin == xmax:
+    xmin_px = int(xs.min())
+    xmax_px = int(xs.max())
+    if xmin_px == xmax_px:
         return None
 
+    sx, sy = (1.0 / width, 1.0 / height) if normalize else (1.0, 1.0)
+
     if degree == 1:
-        y_at_xmin = float(ys[xs == xmin].mean())
-        y_at_xmax = float(ys[xs == xmax].mean())
-        a = (y_at_xmax - y_at_xmin) / (xmax - xmin)
-        b = y_at_xmin - a * xmin
+        y_at_xmin = float(ys[xs == xmin_px].mean())
+        y_at_xmax = float(ys[xs == xmax_px].mean())
+        x0, x1 = xmin_px * sx, xmax_px * sx
+        y0, y1 = y_at_xmin * sy, y_at_xmax * sy
+        a = (y1 - y0) / (x1 - x0)
+        b = y0 - a * x0
         coeffs = [a, b]
     else:
         if xs.size <= degree:
             return None  # not enough points to fit this degree
-        coeffs = np.polyfit(xs, ys, degree)
+        coeffs = np.polyfit(xs * sx, ys * sy, degree)
 
-    return PolynomialWithLimits(coeffs, xmin, xmax)
+    return PolynomialWithLimits(coeffs, xmin_px * sx, xmax_px * sx)
 
 
 def midline_from_mask(binary_mask, degree=1):
