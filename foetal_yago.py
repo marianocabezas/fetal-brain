@@ -7,7 +7,7 @@ from shutil import copyfile
 from functools import partial
 from scipy.ndimage import binary_fill_holes
 from utils import load_xcf
-from midline import fit_polynomial_to_mask, MIDLINE_SPEC, CURVE_SPEC
+from midline import fit_polynomial_to_mask, MIDLINE_SPEC, CURVE_SPEC, PiecewiseSpec
 from midline_models import MidlineSegmenter
 
 # ── curve prediction scope ────────────────────────────────────────────────────
@@ -144,26 +144,29 @@ def process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose=F
         return None
 
 
-def load_processed_subject(subj_code, out_path, verbose=False):
+def load_processed_subject(subj_code, out_path, active_spec=None, verbose=False):
     """
     Load an already-processed subject directly from out_path (skip XCF processing).
-    Returns (subj_code, dcm_image, pixel_array, final_seg, curves) or None on failure.
+    Returns (subj_code, dcm_image, pixel_array, final_seg[, curves]) or None on failure.
+    Curves are only loaded when active_spec is not None.
     """
     try:
         final_seg = skio.imread(os.path.join(out_path, subj_code + '.png'))
-        curves    = np.load(os.path.join(out_path, subj_code + '_curves.npy'))
         ds        = dicom.dcmread(os.path.join(out_path, subj_code + '.dcm'))
         dcm_image = np.mean(ds.pixel_array, axis=-1)
         if verbose:
             print('{:<6} loaded from processed'.format(subj_code))
-        return subj_code, dcm_image, ds.pixel_array, final_seg, curves
+        if active_spec is not None:
+            curves = np.load(os.path.join(out_path, subj_code + '_curves.npy'))
+            return subj_code, dcm_image, ds.pixel_array, final_seg, curves
+        return subj_code, dcm_image, ds.pixel_array, final_seg
 
     except FileNotFoundError as e:
         print('ERROR loading processed', subj_code, ':', e)
         return None
 
 
-def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, verbose=False):
+def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, active_spec=None, verbose=False):
     """
     Run the fetal data sorting pipeline.
 
@@ -190,10 +193,14 @@ def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, v
                 labels += layer_keys
                 global_dict.setdefault(sub, []).append((pixel_array, final_seg, curves))
         elif mode == 'load_only':
-            result = load_processed_subject(subj_code, out_path, verbose)
+            result = load_processed_subject(subj_code, out_path, active_spec=active_spec, verbose=verbose)
             if result is not None:
-                subj_code, dcm_image, pixel_array, final_seg, curves = result
-                global_dict.setdefault(sub, []).append((pixel_array, final_seg, curves))
+                if active_spec is not None:
+                    subj_code, dcm_image, pixel_array, final_seg, curves = result
+                    global_dict.setdefault(sub, []).append((pixel_array, final_seg, curves))
+                else:
+                    subj_code, dcm_image, pixel_array, final_seg = result
+                    global_dict.setdefault(sub, []).append((pixel_array, final_seg))
         else:
             raise ValueError("mode must be 'full' or 'load_only', got '{:}'".format(mode))
 
@@ -211,16 +218,47 @@ if __name__ == '__main__':
     xcf_path, dicom_path, debug_path = 'Anotacions 2026/', 'Cerebel_dicom_anonim/', 'outDebug/'
     processed_path = 'ProcessedData/'   # local — images, DICOMs, weights
     results_path   = '/home/yago/Yago Lab Dropbox/medicalImaging/experiments/'  # Dropbox — CSVs only
-    layer_list  = ['cavum', 'cerebel', 'cisterna magna', 'plec nucal', 'midline', 'silvio']
-    layer_names = ['cavum', 'cerebellum', 'cisterna magna', 'nuchal fold', 'midline', 'sylvian']
-    mode    = 'load_only'  # 'full'
-    classes = ['background'] + layer_names[:-2]
+    mode = 'load_only'  # 'full'
 
-    global_dict = run_pipeline(mode, xcf_path, dicom_path, processed_path, debug_path, layer_list, verbose=False)
+    # ── structure definitions ──────────────────────────────────────────────────
+    # Each structure has:
+    #   name  : display name used in results
+    #   layer : XCF layer key (lowercased)
+    #   type  : 'area' -> segmentation class / 'line' -> curve prediction
+    #   degree: polynomial degree (only used for 'line' structures)
+    structures = [
+        {'name': 'cavum',         'layer': 'cavum',         'type': 'area'},
+        {'name': 'cerebellum',    'layer': 'cerebel',       'type': 'area'},
+        {'name': 'cisterna magna','layer': 'cisterna magna', 'type': 'area'},
+        {'name': 'nuchal fold',   'layer': 'plec nucal',    'type': 'area'},
+        #{'name': 'midline',       'layer': 'midline',       'type': 'line', 'degree': 1},
+        #{'name': 'sylvian',       'layer': 'silvio',        'type': 'line', 'degree': 3},
+    ]
+
+    area_structures = [s for s in structures if s['type'] == 'area']
+    line_structures = [s for s in structures if s['type'] == 'line']
+
+    layer_list = [s['layer'] for s in area_structures] + [s['layer'] for s in line_structures]
+    classes    = ['background'] + [s['name'] for s in area_structures]
+
+    # Build ACTIVE_SPEC from the active line structures (empty -> area-only mode)
+    if line_structures:
+        ACTIVE_SPEC = PiecewiseSpec(
+            [s['degree'] for s in line_structures],
+            names=[s['name'] for s in line_structures]
+        )
+        CURVE_STRUCTURES = [
+            {'name': s['name'], 'layer': s['layer'], 'degree': s['degree']}
+            for s in line_structures
+        ]
+    else:
+        ACTIVE_SPEC = None
+
+    global_dict = run_pipeline(mode, xcf_path, dicom_path, processed_path, debug_path, layer_list, active_spec=ACTIVE_SPEC, verbose=False)
 
     networks = [
         #('fcn-resnet101',     'FCN ResNet101',     partial(FCN_ResNet101,        lr=1e-4, pretrained=True)),
-        ('deeplab-resnet101', 'DeepLab ResNet101', partial(DeeplabV3_ResNet101,  lr=1e-4, pretrained=True)),
+        #('deeplab-resnet101', 'DeepLab ResNet101', partial(DeeplabV3_ResNet101,  lr=1e-4, pretrained=True)),
         ('fcn-resnet50',      'FCN ResNet50',      partial(FCN_ResNet50,         lr=1e-4, pretrained=True)),
         #('deeplab-resnet50',  'DeepLab ResNet50',  partial(DeeplabV3_ResNet50,   lr=1e-4, pretrained=True)),
         #('deeplab-mobilenet', 'DeepLab MobileNet', partial(DeeplabV3_MobileNet,  lr=1e-4, pretrained=True)),
@@ -234,13 +272,16 @@ if __name__ == '__main__':
     all_results = []
     t_total_start = time()
     for net_name, display_name, base_network_f in networks:
-        # wrap the base segmenter factory so each built net is a two-head
-        # (segmentation + midline) model; degree 1, integral term down-weighted
-        # relative to the endpoint term (different units).
-        def network_f(_base_f=base_network_f, **kwargs):
-            return MidlineSegmenter(
-                _base_f(**kwargs), spec=ACTIVE_SPEC, lambda_int = 0.01, lambda_midline = 1.0
-            )
+        if ACTIVE_SPEC is not None:
+            # wrap with curve prediction mouth
+            def network_f(_base_f=base_network_f, _spec=ACTIVE_SPEC, **kwargs):
+                return MidlineSegmenter(
+                    _base_f(**kwargs), spec=_spec, lambda_int=0.01, lambda_midline=1.0
+                )
+        else:
+            # area-only: use the base segmenter directly
+            def network_f(_base_f=base_network_f, **kwargs):
+                return _base_f(**kwargs)
 
         print('[{:}] Starting {:}'.format(strftime("%d/%m/%Y - %H:%M:%S"), display_name))
         t_start = time()
@@ -248,8 +289,8 @@ if __name__ == '__main__':
             net_name, display_name, 'fetal us segmentation', network_f, global_dict,
             os.path.join(processed_path, 'Weights'),
             os.path.join(processed_path, 'Predictions', net_name),
-            classes, n_inputs=3, n_classes=len(classes), epochs = 10, patience=5,
-            train_batch=1, test_batch=1, n_seeds=5, verbose=1, save_plots=False,
+            classes, n_inputs=3, n_classes=len(classes), epochs = 30, patience=5,
+            train_batch=1, test_batch=1, n_seeds=5, verbose=1, save_plots=True,
         )
         _, _, results_df = exp.run(master_seed=42)
         results_df['network'] = display_name

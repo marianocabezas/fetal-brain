@@ -446,4 +446,9 @@ class SegFormer(Segmenter):
         return F.interpolate(out, size=data.shape[-2:], mode='bilinear', align_corners=False)
 
     def target_layer(self):
-        return self.model.segformer.encoder
+        # HF refactors moved/renamed the encoder attribute across versions.
+        # Hook the encoder if it's exposed, otherwise the SegformerModel itself
+        # — both emit a ModelOutput with hidden_states, which _to_feature_map
+        # resolves to the last-stage (B, C, H, W) feature map.
+        seg = self.model.segformer
+        return getattr(seg, 'encoder', seg)
