@@ -513,6 +513,110 @@ class FCN_ResNet50(Segmenter):
         return self.fcn.backbone
 
 
+class FCN_ResNet50_R(Segmenter):
+    def __init__(
+        self, n_inputs, n_seg_outputs, n_reg_outputs, pretrained=False, lr=1e-3,
+        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        verbose=True
+    ):
+        super().__init__(n_seg_outputs)
+        # Init        
+        self.channels = n_inputs
+        self.lr = lr
+        self.device = device
+        if pretrained:
+            try:
+                weights = models.segmentation.FCN_ResNet50_Weights.DEFAULT
+                self.fcn = models.segmentation.fcn_resnet50(weights=weights)
+            except TypeError:
+                self.fcn = models.segmentation.fcn_resnet50(pretrained)
+        else:
+            self.fcn = models.segmentation.fcn_resnet50()
+        if n_inputs > 3:
+            conv_input = nn.Conv2d(
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+            # We assume that RGB channels will be the first 3
+            conv_input.weight.data[:, :3, ...].copy_(
+                self.fcn.backbone.conv1.weight.data
+            )
+            self.fcn.backbone.conv1 = conv_input
+        elif n_inputs < 3:
+            self.fcn.backbone.conv1 = nn.Conv2d(
+                n_inputs, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+        self.last_features = self.fcn.classifier[-1].in_channels
+        self.fcn.classifier[-1] = nn.Conv2d(
+            self.last_features, n_seg_outputs, kernel_size=1, stride=1
+        )
+        self.aux_last_features = self.fcn.aux_classifier[-1].in_channels
+        self.fcn.aux_classifier[-1] = nn.Conv2d(
+            self.aux_last_features, n_seg_outputs, kernel_size=1, stride=1
+        )
+
+        self.regressor = nn.Linear(self.fcn.backbone.out_channels, n_reg_outputs)
+
+        self.train_functions = [
+            {
+                'name': 'xentropy',
+                'weight': 1,
+                'f': lambda p, t: self._cross_entropy(p[0], t[0])
+            },
+            {
+                'name': 'mse',
+                'weight': 1,
+                'f': lambda p, t: F.mse_loss(p[1], t[1])
+            }
+        ]
+
+        self.val_functions = [
+            {
+                'name': 'xent',
+                'weight': 1,
+                'f': lambda p, t: self._cross_entropy(p[0], t[0])
+            },
+
+            {
+                'name': 'dsc',
+                'weight': 1,
+                'f': lambda p, t: self._dsc_loss(p[0], t[0])
+            },
+            {
+                'name': 'mIoU',
+                'weight': 0,
+                'f': lambda p, t: self._mean_iou(p[0], t[0])
+            },
+            {
+                'name': 'mse',
+                'weight': 1,
+                'f': lambda p, t: F.mse_loss(p[1], t[1])
+            }
+
+        ]
+
+        # <Optimizer setup>
+        # We do this last step after all parameters are defined
+        model_params = filter(lambda p: p.requires_grad, self.parameters())
+        self.optimizer_alg = torch.optim.Adam(model_params, lr=self.lr)
+        if verbose > 1:
+            print(
+                'Network created on device {:} with training losses '
+                '[{:}] and validation losses [{:}]'.format(
+                    self.device,
+                    ', '.join([tf['name'] for tf in self.train_functions]),
+                    ', '.join([vf['name'] for vf in self.val_functions])
+                )
+            )
+
+    def forward(self, data):
+        self.fcn.to(self.device)
+        feat = self.fcn.backbone(data)
+        return self.fcn(data)['out'], self.regressor(feat)
+
+    def target_layer(self):
+        return self.fcn.backbone
+
+
 class FCN_ResNet101(Segmenter):
     def __init__(
         self, n_inputs, n_outputs, pretrained=False, lr=1e-3,
