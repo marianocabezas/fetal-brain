@@ -76,7 +76,6 @@ def find_cerebellum_axes(
                 v2 = np.array([s.item(), - c.item()])
                 best_ratio = ratio
 
-    print(v1, v2)
     return v1, v2
 
 
