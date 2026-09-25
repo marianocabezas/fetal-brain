@@ -466,7 +466,7 @@ def main():
 
     classes = ['background'] + layer_names[:-2]
 
-    '''# The experiments are run next. We capture some warnings related to
+    # The experiments are run next. We capture some warnings related to
     # image loading to clean the debugging console.
     # FCN ResNet50
     fcn50_dsc, fcn50_k_dsc, fcn50_pred = run_segmentation_experiments(
@@ -525,7 +525,7 @@ def main():
                     ' | '.join(f'{pred_i:5.2f}mm' for pred_i in pred_tcd),
                     '|'
                 )
-                writer.writerow([im_id, gt_tcd] + [pred_i for pred_i in pred_tcd])'''
+                writer.writerow([im_id, gt_tcd] + [pred_i for pred_i in pred_tcd])
 
     experts = sorted(os.listdir(test_path))
 
