@@ -2,6 +2,7 @@ import cv2
 import gzip
 import pickle
 import numpy as np
+from PIL import Image
 from gimpformats.gimpXcfDocument import GimpDocument
 from scipy.ndimage import binary_dilation
 from skimage.morphology import skeletonize
@@ -469,3 +470,79 @@ def load_compressed_pickle(path):
     with gzip.open(path, 'rb') as f:
         data = pickle.load(f)
     return data
+
+
+def fit_ellipse_torch(points):
+    """
+    Fits an ellipse using the Direct Least Squares method (Halir-Flusser) in PyTorch.
+    points: Tensor of shape (N, 2)
+    Returns: (x0, y0), (2b, 2a), theta_degrees
+    """
+    x = points[:, 0].unsqueeze(1)
+    y = points[:, 1].unsqueeze(1)
+
+    D = torch.cat([x * x, x * y, y * y, x, y, torch.ones_like(x)], dim=1)
+    S = torch.mm(D.t(), D)
+
+    C = torch.zeros((6, 6), device=points.device)
+    C[0, 2] = 2.0
+    C[1, 1] = -1.0
+    C[2, 0] = 2.0
+
+    S11 = S[:3, :3]
+    S12 = S[:3, 3:]
+    S22 = S[3:, 3:]
+
+    S22_inv = torch.inverse(S22)
+    M = torch.mm(torch.inverse(C[:3, :3]), (S11 - torch.mm(S12, torch.mm(S22_inv, S12.t()))))
+
+    eigenvalues, eigenvectors = torch.linalg.eig(M)
+    eigenvalues, eigenvectors = eigenvalues.real, eigenvectors.real
+
+    cond = 4 * eigenvectors[0, :] * eigenvectors[2, :] - eigenvectors[1, :] ** 2
+    a1 = eigenvectors[:, cond > 0]
+
+    a2 = - torch.mm(S22_inv, torch.mm(S12.t(), a1))
+    v = torch.cat([a1, a2], dim=0).flatten()
+
+    A, B, C, D, E, F = v
+
+    num = B * B - 4 * A * C
+    x0 = (2 * C * D - B * E) / num
+    y0 = (2 * A * E - B * D) / num
+
+    term = torch.sqrt((A - C) ** 2 + B ** 2)
+    scale = -2 * (A * x0 ** 2 + B * x0 * y0 + C * y0 ** 2 + D * x0 + E * y0 + F)
+    axis_1 = torch.sqrt(scale / (A + C - term))
+    axis_2 = torch.sqrt(scale / (A + C + term))
+
+    theta = 0.5 * torch.atan2(B, A - C)
+
+    # Ensure a is always the semi-major axis (the longer one)
+    if axis_1 < axis_2:
+        a, b = axis_2, axis_1
+        theta = theta + np.pi / 2
+    else:
+        a, b = axis_1, axis_2
+
+    return (x0.item(), y0.item()), (a.item(), b.item()), theta.item()
+
+
+def process_annotation(annotation_path):
+    ann_img = Image.open(annotation_path).convert('L')
+    ann_np = np.array(ann_img)
+    binary = (ann_np > 127).astype(np.uint8)
+    skeleton = skeletonize(binary).astype(np.uint8)
+
+    y_coords, x_coords = np.where(skeleton > 0)
+    if len(x_coords) < 5: return None
+
+    points = torch.tensor(np.stack([x_coords, y_coords], axis=1), dtype=torch.float32)
+    center, axes_lengths, angle = fit_ellipse_torch(points)
+    x0, y0 = center
+    a, b = axes_lengths
+
+    return {
+        'binary': binary,
+        'params': (x0, y0, a, b, angle)
+    }

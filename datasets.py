@@ -1,8 +1,13 @@
 import os
 import csv
 import numpy as np
+from PIL import Image
 from matplotlib.image import imread
 from torch.utils.data.dataset import Dataset
+
+from utils import process_annotation
+
+import torch
 
 
 def ellipse_to_mask(a, b, theta, x0, y0, height, width):
@@ -139,3 +144,59 @@ class FetalMixedDataset(Dataset):
 
     def __len__(self):
         return len(self.images)
+
+
+class EllipseDataset(Dataset):
+    def __init__(self, img_paths):
+
+        self.images = []
+        self.masks = []
+        self.params = []
+
+        for f in img_paths:
+            image_rgb = Image.open(f).convert('RGB')
+            if image_rgb.size == (800, 540):
+                ann_path = f.replace('.png', '_Annotation.png')
+
+                # Load image
+                w, h = image_rgb.size  # 800, 540 based on previous logs
+
+                # Extract parameters using the function defined in the previous cell
+                np_image = np.array(image_rgb)
+                min_int = np.min(np_image, axis=(0, 1), keepdims=True)
+                max_int = np.max(np_image, axis=(0, 1), keepdims=True)
+                np_image = (np_image - min_int) / (max_int - min_int)
+                self.images.append(np.moveaxis(np_image, -1, 0).astype(np.float32))
+
+                data = process_annotation(ann_path)
+                if data is None:
+                    x0, y0, a, b, theta = torch.zeros(5, dtype=torch.float32)
+                    mask = None
+                else:
+                    x0, y0, a, b, theta = data['params']
+                    mask = data['binary']
+
+                self.masks.append(mask)
+
+                # Normalized parameters
+                x0 = 2 * (x0 - w / 2) / w
+                y0 = 2 * (y0 - h / 2) / h
+                vx = np.sin(theta)
+                vy = - np.cos(theta)
+                wb = b / a
+
+                d = np.sqrt(w ** 2 + h ** 2)
+                # diagonal norm
+                # a = a / d
+                # log norm
+                a = np.log(1 + a) / np.log(1 + d)
+
+                self.params.append(torch.tensor([x0, y0, vx, vy, a, wb], dtype=torch.float32))
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        np_image = self.images[idx]
+        target = (self.params[idx], self.masks[idx].astype(np.float32))
+        return np_image, target

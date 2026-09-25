@@ -347,7 +347,6 @@ class BaseModel(nn.Module):
 
 
             if verbose:
-                print(' '.join([' '] * 300), end='\r')
                 whites = ' '.join([''] * 12)
                 final_s = '\033[K' + whites + ' | '.join(
                     [epoch_s, tr_loss_s, loss_s] +
@@ -363,7 +362,6 @@ class BaseModel(nn.Module):
         t_end = time.time() - t_start
         t_end_s = time_to_string(t_end)
         if verbose:
-            print(' '.join([' '] * 300), end='\r')
             print(
                     'Training finished in {:} epochs ({:}) '
                     'with minimum loss = {:f} (epoch {:d})'.format(
@@ -457,7 +455,6 @@ class BaseModel(nn.Module):
             100 * (batch_i + 1) / n_batches, progress_s + remainder_s,
             loss_name, b_loss, mean_loss, time_s, eta_s + '\033[0m'
         )
-        print(' '.join([' '] * 300), end='\r')
         print('\033[K' + batch_s, end='\r', flush=True)
 
     @staticmethod
@@ -480,7 +477,6 @@ class BaseModel(nn.Module):
             100 * (pi + 1) / n_patches,
             progress_s, remainder_s, time_s, eta_s + '\033[0m'
         )
-        print(' '.join([' '] * 300), end='\r')
         print('\033[K' + batch_s, end='\r', flush=True)
 
     def freeze(self):
