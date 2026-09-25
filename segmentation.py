@@ -389,6 +389,8 @@ def main():
     Path(weight_path).mkdir(parents=True, exist_ok=True)
     metrics_path = os.path.join(out_path, 'Biometrics')
     Path(metrics_path).mkdir(parents=True, exist_ok=True)
+    pred_path = os.path.join(out_path, 'Predictions')
+    Path(metrics_path).mkdir(parents=True, exist_ok=True)
     lr = options['learning_rate']
     axes_lr = options['axes_lr']
     axes_iterations = options['axes_iterations']
