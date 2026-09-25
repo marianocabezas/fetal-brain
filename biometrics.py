@@ -45,8 +45,12 @@ def find_cerebellum_axes(
         x, y, n_init=32, n_iters=1000, lr=5e-2,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ):
-    torch_x = torch.as_tensor(x, dtype=torch.float32, device=device)
-    torch_y = torch.as_tensor(y, dtype=torch.float32, device=device)
+    torch_x = torch.as_tensor(
+        x, dtype=torch.float32, device=device
+    ).requires_grad_(True)
+    torch_y = torch.as_tensor(
+        y, dtype=torch.float32, device=device
+    ).requires_grad_(True)
 
     norm_x = torch_x - torch_x.mean()
     norm_y = torch_y - torch_y.mean()
@@ -107,8 +111,8 @@ def line_mask_intersections(center, direction, vert_edges, horiz_edges, eps=1e-9
     pos = ts > eps
     neg = ts < -eps
 
-    p_pos = pts[pos][np.argmin(ts[pos])] if pos.any() else None
-    p_neg = pts[neg][np.argmax(ts[neg])] if neg.any() else None
+    p_pos = pts[pos][np.argmax(ts[pos])] if pos.any() else None
+    p_neg = pts[neg][np.argmin(ts[neg])] if neg.any() else None
     return p_neg.tolist(), p_pos.tolist()
 
 
@@ -160,12 +164,17 @@ def compute_tcd(
     v2_xf_w = v2_xf * spacing[0]
     v2_y0_w = v2_y0 * spacing[1]
     v2_yf_w = v2_yf * spacing[1]
+    axis1 = ([v1_x0, v1_xf], [v1_y0, v1_yf])
+    axis2 = ([v2_x0, v2_xf], [v2_y0, v2_yf])
 
     length1 = np.sqrt((v1_xf_w - v1_x0_w) ** 2 + (v1_yf_w - v1_y0_w) ** 2)
     length2 = np.sqrt((v2_xf_w - v2_x0_w) ** 2 + (v2_yf_w - v2_y0_w) ** 2)
 
     tcd = length2 if length2 > length1 else length1
-    return tcd
+    long_axis = axis2 if length2 > length1 else axis1
+    short_axis = axis2 if length2 <= length1 else axis1
+
+    return tcd, long_axis, short_axis
 
 
 def parse_inputs():
@@ -257,7 +266,7 @@ def main():
 
             #### Cerebellum biometrics
             cerebellum = mask == 2
-            tcd = compute_tcd(cerebellum, spacing, n_init, n_epochs, lr, device)
+            tcd, _, _ = compute_tcd(cerebellum, spacing, n_init, n_epochs, lr, device)
             tcds.append(tcd)
 
             print(
