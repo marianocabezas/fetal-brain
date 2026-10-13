@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 from utils import color_codes, load_xcf
 from datasets import FetalDataset
 from models import FCN_ResNet50, FCN_ResNet101
-from biometrics import compute_tcd
+from biometrics import compute_tcd, sample_arc, compute_section_distribution
 
 
 def parse_inputs():
@@ -224,7 +224,10 @@ def run_segmentation_experiments(
                 net.load_model(model_path)
             except IOError:
                 net.train()
-                net.fit(training_loader, validation_loader, epochs=epochs, patience=patience)
+                net.fit(
+                    training_loader, validation_loader,
+                    epochs=epochs, patience=patience
+                )
                 net.save_model(model_path)
 
             if verbose > 2:
@@ -485,11 +488,11 @@ def main():
     seeds = np.random.randint(0, 100000, n_seeds)
     print(
         f'Image ID    | Expert  |',
-        f'S{seeds[0]:05d}  |'
-        f'S{seeds[1]:05d}  |'
-        f'S{seeds[2]:05d}  |'
-        f'S{seeds[3]:05d}  |'
-        f'S{seeds[4]:05d}  |'
+        f'S{seeds[0]:05d}  |',
+        f'S{seeds[1]:05d}  |',
+        f'S{seeds[2]:05d}  |',
+        f'S{seeds[3]:05d}  |',
+        f'S{seeds[4]:05d}  |',
     )
 
     tcd_csv = os.path.join(out_path, 'tcd_seed_results.csv')
@@ -511,15 +514,15 @@ def main():
                 spacing = dcm_data[0x00280030].value
 
                 pred_list = fcn50_pred[im_id]
-                gt_tcd, _, _ = compute_tcd(
+                gt_tcd, _, _, _, _, _ = compute_tcd(
                     gt_mask == 2, spacing, lr=axes_lr,
                     n_iters=axes_iterations
                 )
-                pred_tcd, _, _ = [
+                pred_tcd = [
                     compute_tcd(
                         pred_i == 2, spacing, lr=axes_lr,
                     n_iters=axes_iterations
-                    ) for pred_i in pred_list
+                    )[0] for pred_i in pred_list
                 ]
 
                 print(
@@ -600,16 +603,16 @@ def main():
         )
         test_net.save_model(model_path)
 
-
-    print(
-        'Image ID    |   Pred   |', ' | '.join([
-            f' {e.lower():<6} ' for e in experts
-        ]), '|'
-    )
     tcd_csv = os.path.join(out_path, 'tcd_comparison_results.csv')
-    header_info = ['image_id', network_name] + [
-        e.lower() for e in experts
+    header_info = ['image_id', 'tcd_' + network_name] + [
+        'tcd_' + e.lower() for e in experts
+    ] + ['cm_' + network_name] + [
+        'cm_' + e.lower() for e in experts
+    ] + ['nf_' + network_name] + [
+        'nf_' + e.lower() for e in experts
     ]
+    print(header_info)
+    print('Image ID    |   TCD    |   CM    |   NF    |')
 
     test_net.eval()
     all_tcd_dict = {
@@ -635,7 +638,7 @@ def main():
                     test_net.inference(im)[0], axis=0
                 ).astype(np.uint8)
             pred_cerebellum = pred_mask == 2
-            pred_tcd, pred_tcd_axis, _ = compute_tcd(
+            pred_tcd, pred_tcd_axis, _, _, pred_vcer, pred_cereb_c = compute_tcd(
                 pred_cerebellum, spacing, lr=axes_lr,
                 n_iters=axes_iterations
             )
@@ -661,7 +664,48 @@ def main():
             )
             plt.close()
 
+            #### CSP biometrics
+            csp = mask == 1
+            csp_com = np.mean(np.where(csp), axis=1)[::-1]
+
+            vc2c = np.array(
+                [csp_com[0] - pred_cereb_c[0], csp_com[1] - pred_cereb_c[1]]
+            )
+            v_array = sample_arc(vc2c, pred_vcer, 200)
+
+            #### Cisterna magna biometrics
+            cm_segments = compute_section_distribution(
+                mask == 3, v_array, pred_cereb_c, spacing, plot=True
+            )
+            ax = plt.gca()
+            ax.axis("off")
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(
+                    metrics_path,
+                    f'{im_id}_{network_name}_cm.png'
+                )
+            )
+            plt.close()
+
+            #### Nuchal fold biometrics
+            nf_segments = compute_section_distribution(
+                mask == 4, v_array, pred_cereb_c, spacing, plot=True
+            )
+            ax = plt.gca()
+            ax.axis("off")
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(
+                    '/home/mariano/Datasets/USFoetalSorted-Anna/Debugging',
+                    f'{im_id}_nf.png'
+                )
+            )
+            plt.close()
+
             e_tcds = []
+            e_cm = []
+            e_nf = []
             for expert in experts:
                 xcf_filepath = os.path.join(test_path, expert, tst_file)
                 names, data = load_xcf(xcf_filepath)
@@ -674,17 +718,30 @@ def main():
                 #### Data preparation
                 # > Area segmentations
                 e_mask = np.max([
-                    (i + 1) * binary_fill_holes(np.array(layer_dict[name])[..., -1] > 0)
+                    (i + 1) * binary_fill_holes(
+                        np.array(layer_dict[name])[..., -1] > 0
+                    )
                     for i, name in enumerate(layer_list[:-2])
                 ], axis=0)
                 try:
                     e_cerebellum = e_mask == 2
-                    e_tcd, e_tcd_axis, _ = compute_tcd(
+                    e_tcd, e_tcd_axis, _, _, e_vcer, e_cereb_c = compute_tcd(
                         e_cerebellum, spacing, lr=axes_lr,
                         n_iters=axes_iterations
                     )
                     e_tcds.append(e_tcd)
                     all_tcd_dict[expert].append(e_tcd)
+
+                    e_cm_segments = compute_section_distribution(
+                        e_mask == 3, v_array, pred_cereb_c, spacing
+                    )
+                    e_cm.append(np.median(e_cm_segments))
+
+                    e_nf_segments = compute_section_distribution(
+                        e_mask == 4, v_array, pred_cereb_c, spacing
+                    )
+                    e_nf.append(np.median(e_nf_segments))
+
                     plt.figure(figsize=(20, 30))
                     plt.imshow(dcm_data.pixel_array, cmap='gray')
                     plt.imshow(
@@ -709,10 +766,18 @@ def main():
 
             print(
                 f'Image {im_id:>5} | {pred_tcd:6.3f}mm |',
-                ' | '.join(f'{e_i:6.3f}mm' for e_i in e_tcds),
-                '|'
+                f'{np.median(cm_segments):6.3f}mm |',
+                f'{np.median(nf_segments):6.3f}mm |',
             )
-            writer.writerow([im_id, pred_tcd] + [e_i for e_i in e_tcds])
+            writer.writerow(
+                [im_id, pred_tcd] + [
+                    e_i for e_i in e_tcds
+                ] + [np.median(cm_segments)] + [
+                    e_i for e_i in e_cm
+                ] + [np.median(nf_segments)] + [
+                    e_i for e_i in e_nf
+                ]
+            )
         print(
             f'Mean        |',
             ' | '.join([

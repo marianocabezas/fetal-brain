@@ -9,6 +9,9 @@ from tqdm.auto import tqdm
 
 import pydicom as dicom
 
+import matplotlib.pylab as plt
+from matplotlib.colors import ListedColormap
+
 import torch
 
 from utils import load_xcf
@@ -76,18 +79,60 @@ def find_cerebellum_axes(
             ratio = ratio_loss((norm_x, norm_y), theta)
             if ratio < best_ratio:
                 c, s = torch.cos(theta), torch.sin(theta)
-                v1 = np.array([c.item(), s.item()])
-                v2 = np.array([s.item(), - c.item()])
+
+                proj_u, proj_v = project_points((norm_x, norm_y), theta)
+                l_axis1 = proj_u.max() - proj_u.min()
+                l_axis2 = proj_v.max() - proj_v.min()
+                if l_axis1 >= l_axis2:
+                    v1 = np.array([c.item(), s.item()])
+                    v2 = np.array([s.item(), - c.item()])
+                else:
+                    v2 = np.array([c.item(), s.item()])
+                    v1 = np.array([s.item(), - c.item()])
+
                 best_ratio = ratio
 
-    return v1, v2
+                extreme_u = torch.as_tensor(
+                    [proj_u.max(), proj_u.min()],
+                    dtype=torch.float32, device=device
+                )
+                extreme_v = torch.as_tensor(
+                    [proj_v.max(), proj_v.min()],
+                    dtype=torch.float32, device=device
+                )
+
+                extreme_x, extreme_y = project_points(
+                    (extreme_u, extreme_v), - theta
+                )
+                denorm_e_x = extreme_x.mean().cpu() + torch_x.mean().detach().cpu()
+                denorm_e_y = extreme_y.mean().cpu() + torch_y.mean().detach().cpu()
+
+                center = (denorm_e_x.numpy(), denorm_e_y.numpy())
+
+    return v1, v2, center
 
 
-def line_mask_intersections(center, direction, vert_edges, horiz_edges, eps=1e-9):
+def line_mask_intersections(
+        center, direction, mask, eps=1e-9
+):
     cx, cy = center
     dx, dy = direction
-    vx, vy_lo, vy_hi = vert_edges
-    hy, hx_lo, hx_hi = horiz_edges
+
+    # vertical edges: boundary between column c and c+1 -> x = c+0.5,
+    # y spans [r-0.5, r+0.5]
+    vdiff = mask[:, 1:] != mask[:, :-1]
+    rows, cols = np.where(vdiff)
+    vx = cols.astype(float) + 0.5
+    vy_lo = rows.astype(float) - 0.5
+    vy_hi = rows.astype(float) + 0.5
+
+    # horizontal edges: boundary between row r and r+1 -> y = r+0.5,
+    # x spans [c-0.5, c+0.5]
+    hdiff = mask[1:, :] != mask[:-1, :]
+    rows2, cols2 = np.where(hdiff)
+    hy = rows2.astype(float) + 0.5
+    hx_lo = cols2.astype(float) - 0.5
+    hx_hi = cols2.astype(float) + 0.5
 
     ts, pts = [], []
 
@@ -108,12 +153,29 @@ def line_mask_intersections(center, direction, vert_edges, horiz_edges, eps=1e-9
     ts = np.concatenate(ts)
     pts = np.concatenate(pts, axis=0)
 
-    pos = ts > eps
-    neg = ts < -eps
+    valid = np.abs(ts) > eps
 
-    p_pos = pts[pos][np.argmax(ts[pos])] if pos.any() else None
-    p_neg = pts[neg][np.argmin(ts[neg])] if neg.any() else None
-    return p_neg.tolist(), p_pos.tolist()
+    p_pos = pts[valid][np.argmax(ts[valid])].tolist() if valid.any() else None
+    p_neg = pts[valid][np.argmin(ts[valid])].tolist() if valid.any() else None
+    return p_neg, p_pos
+
+
+def sample_arc(a, b, n=100):
+    a /= np.linalg.norm(a)
+    b /= np.linalg.norm(b)
+
+    if a @ b < 0:
+        b = -b
+    u = b - (a @ b) * a
+    s = np.linalg.norm(u)
+    if s < 1e-12:
+        return np.tile(a, (n, 1))
+    u /= s
+    omega = np.arctan2(s, a @ b)
+    info = np.finfo(np.double)
+    print(0, omega, info.min, info.max)
+    phi = np.random.uniform(0, omega, size=(n, 1))
+    return np.cos(phi) * a + np.sin(phi) * u
 
 
 def compute_tcd(
@@ -121,38 +183,18 @@ def compute_tcd(
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ):
     y, x = np.where(cerebellum)
-    c_x, c_y = np.mean(x), np.mean(y)
+    com_x, com_y = np.mean(x), np.mean(y)
 
     # Find the axes (minimise the ratio between the short and long edges of the
     # bounding box). In our case, we can reduce the box to a set of rotated axes
     # located in the center of mass.
-    v1, v2 = find_cerebellum_axes(x, y, n_init, n_iters, lr, device)
-
-    # vertical edges: boundary between column c and c+1 -> x = c+0.5,
-    # y spans [r-0.5, r+0.5]
-    vdiff = cerebellum[:, 1:] != cerebellum[:, :-1]
-    rows, cols = np.where(vdiff)
-    vx = cols.astype(float) + 0.5
-    vy_lo = rows.astype(float) - 0.5
-    vy_hi = rows.astype(float) + 0.5
-
-    # horizontal edges: boundary between row r and r+1 -> y = r+0.5,
-    # x spans [c-0.5, c+0.5]
-    hdiff = cerebellum[1:, :] != cerebellum[:-1, :]
-    rows2, cols2 = np.where(hdiff)
-    hy = rows2.astype(float) + 0.5
-    hx_lo = cols2.astype(float) - 0.5
-    hx_hi = cols2.astype(float) + 0.5
+    v1, v2, (c_vx, c_vy) = find_cerebellum_axes(x, y, n_init, n_iters, lr, device)
 
     ((v1_x0, v1_y0), (v1_xf, v1_yf)) = line_mask_intersections(
-        (c_x, c_y), v1,
-        (vx, vy_lo, vy_hi),
-        (hy, hx_lo, hx_hi)
+        (com_x, com_y), v1, cerebellum
     )
     ((v2_x0, v2_y0), (v2_xf, v2_yf)) = line_mask_intersections(
-        (c_x, c_y), v2,
-        (vx, vy_lo, vy_hi),
-        (hy, hx_lo, hx_hi)
+        (com_x, com_y), v2, cerebellum
     )
 
     v1_x0_w = v1_x0 * spacing[0]
@@ -174,7 +216,43 @@ def compute_tcd(
     long_axis = axis2 if length2 > length1 else axis1
     short_axis = axis2 if length2 <= length1 else axis1
 
-    return tcd, long_axis, short_axis
+    return tcd, long_axis, short_axis, v1, v2, (c_vx, c_vy)
+
+
+def compute_section_distribution(mask, v_array, center, spacing, plot=False):
+    segments = []
+    if plot:
+        plt.figure(figsize=(40, 20))
+        plt.imshow(mask, cmap='grey')
+
+    for v_i, v in enumerate(v_array):
+        p0, pf = line_mask_intersections(
+            center, v, mask
+        )
+        if plot:
+            ax = plt.gca()
+            ax.scatter(
+                [center[0]], [center[1]],
+                s=100, c='orange', label='Cerebellum CoM'
+            )
+            ax.quiver(
+                center[0], center[1], v[0] * 100, v[1] * 100,
+                scale_units='xy', scale=1,
+                color='teal', angles='xy'
+            )
+
+        if p0 is not None and pf is not None:
+            p0_sp = np.array(p0) * np.array(spacing)
+            pf_sp = np.array(pf) * np.array(spacing)
+            if plot:
+                ax = plt.gca()
+                ax.plot(
+                    [p0[0], pf[0]], [p0[1], pf[1]],
+                    'r--'
+                )
+            segments.append(np.linalg.norm(pf_sp - p0_sp))
+
+    return segments
 
 
 def parse_inputs():
@@ -266,11 +344,53 @@ def main():
 
             #### Cerebellum biometrics
             cerebellum = mask == 2
-            tcd, _, _ = compute_tcd(cerebellum, spacing, n_init, n_epochs, lr, device)
+            tcd, _, _, _, vcer, cereb_c = compute_tcd(
+                cerebellum, spacing, n_init, n_epochs, lr, device
+            )
             tcds.append(tcd)
 
+            #### CSP biometrics
+            csp = mask == 1
+            csp_com = np.mean(np.where(csp), axis=1)[::-1]
+
+            vc2c = np.array([csp_com[0] - cereb_c[0], csp_com[1] - cereb_c[1]])
+            v_array = sample_arc(vc2c, vcer, 200)
+
+            #### Cisterna magna biometrics
+            cm_segments = compute_section_distribution(
+                mask == 3, v_array, cereb_c, spacing, plot=True
+            )
+            ax = plt.gca()
+            ax.axis("off")
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(
+                    '/home/mariano/Datasets/USFoetalSorted-Anna/Debugging',
+                    f'{im_id}_cm.png'
+                )
+            )
+            plt.close()
+
+            #### Nuchal fold biometrics
+            nf_segments = compute_section_distribution(
+                mask == 4, v_array, cereb_c, spacing, plot=True
+            )
+            ax = plt.gca()
+            ax.axis("off")
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(
+                    '/home/mariano/Datasets/USFoetalSorted-Anna/Debugging',
+                    f'{im_id}_nf.png'
+                )
+            )
+            plt.close()
+
             print(
-                f'{im_id:<5} | [tcd: {tcd:6.3f} mm] | {sorted(layer_dict.keys())}'
+                f'{im_id:<5} | [TCD: {tcd:6.3f} mm] |',
+                f'[Cisterna magna: {np.median(cm_segments):6.3f} mm] |',
+                f'[Nuchal fold: {np.median(nf_segments):6.3f} mm] |',
+                f'{sorted(layer_dict.keys())}'
             )
 
         except (IndexError, FileNotFoundError) as e:
