@@ -680,6 +680,12 @@ def run_comparison(
             )
             plt.close()
 
+            print(
+                f'Image {im_id:>5} | {pred_tcd:6.3f}mm |',
+                f'{np.median(cm_segments):6.3f}mm |',
+                f'{np.median(nf_segments):6.3f}mm |',
+            )
+
             e_tcds = []
             e_cm = []
             e_nf = []
@@ -741,11 +747,6 @@ def run_comparison(
                 except Exception as e:
                     print(f'Error with image {im_id} for expert {expert}', e)
 
-            print(
-                f'Image {im_id:>5} | {pred_tcd:6.3f}mm |',
-                f'{np.median(cm_segments):6.3f}mm |',
-                f'{np.median(nf_segments):6.3f}mm |',
-            )
             writer.writerow(
                 [im_id, pred_tcd] + [
                     e_i for e_i in e_tcds

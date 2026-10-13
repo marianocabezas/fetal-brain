@@ -173,7 +173,6 @@ def sample_arc(a, b, n=100):
     u /= s
     omega = np.arctan2(s, a @ b)
     info = np.finfo(np.double)
-    print(0, omega, info.min, info.max)
     phi = np.random.uniform(0, omega, size=(n, 1))
     return np.cos(phi) * a + np.sin(phi) * u
 
