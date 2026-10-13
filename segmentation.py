@@ -323,12 +323,12 @@ def run_segmentation_experiments(
             seed_dsc_list.append(mosaic_dsc)
             seed_class_dsc_list.append(mosaic_class_dsc)
 
+        seed_mean_dsc = np.nanmean(np.concatenate(seed_dsc_list))
+        seed_class_mean_dsc = np.nanmean(
+            np.concatenate(seed_class_dsc_list, axis=0), axis=0
+        )
         if verbose > 0:
-            seed_mean_dsc = np.nanmean(np.concatenate(seed_dsc_list))
             seed_std_dsc = np.nanstd(np.concatenate(seed_dsc_list))
-            seed_class_mean_dsc = np.nanmean(
-                np.concatenate(seed_class_dsc_list, axis=0), axis=0
-            )
             seed_class_std_dsc = np.nanstd(
                 np.concatenate(seed_class_dsc_list, axis=0), axis=0
             )
@@ -380,96 +380,31 @@ def run_segmentation_experiments(
     return dsc_list, class_dsc_list, prediction_dict
 
 
-def main():
+def run_crossval(
+        global_dict, classes=None, layer_names=None,
+        train_batch=1, test_batch = 1, n_seeds=5, name='fetal us',
+        network_name='fcn-resnet50', display_name='FCN ResNet50',
+):
     # Init
     options = parse_inputs()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    xcf_path = options['xcf_path']
     dicom_path = options['dicom_path']
     out_path = options['out_path']
-    test_path = options['test_path']
     weight_path = os.path.join(out_path, 'Weights')
-    Path(weight_path).mkdir(parents=True, exist_ok=True)
-    metrics_path = os.path.join(out_path, 'Biometrics')
-    Path(metrics_path).mkdir(parents=True, exist_ok=True)
     pred_path = os.path.join(out_path, 'Predictions')
-    Path(metrics_path).mkdir(parents=True, exist_ok=True)
-    lr = options['learning_rate']
-    axes_lr = options['axes_lr']
-    axes_iterations = options['axes_iterations']
+    master_seed = options['master_seed']
     n_epochs = options['epochs']
     patience = options['patience']
-    master_seed = options['master_seed']
-    network_name = 'fcn-resnet50'
-    display_name = 'FCN ResNet50'
-    c = color_codes()
+    axes_lr = options['axes_lr']
+    axes_iterations = options['axes_iterations']
+    if layer_names is None:
+        layer_names = [
+            'cavum', 'cerebellum', 'cisterna magna',
+            'nuchal fold', 'midline', 'sylvian'
+        ]
+    if classes is None:
+        classes = ['background'] + layer_names[:-2]
+    n_classes = len(layer_names) - 1
 
-    train_batch = 1
-    test_batch = 1
-    n_seeds = 5
-    name = 'fetal us'
-
-    layer_list = [
-        'cavum', 'cerebel', 'cisterna magna', 'plec nucal', 'midline', 'silvio'
-    ]
-    layer_names = [
-        'cavum', 'cerebellum', 'cisterna magna', 'nuchal fold', 'midline', 'sylvian'
-    ]
-    n_classes = len(layer_list) - 1
-
-    xcf_files = sorted(
-        [f for f in os.listdir(xcf_path) if f.endswith('.xcf')],
-        key=lambda x: int(x.split('.')[0])
-    )
-    xcf_loop = tqdm(
-        enumerate(xcf_files), total=len(list(xcf_files)), leave=False,
-        desc='XCF and DCM file reading',
-    )
-
-    global_dict = {}
-    subjects = []
-
-    for i, xcf_f in xcf_loop:
-        f_split = xcf_f.split('.')
-        sub = f_split[0]
-        if sub not in subjects:
-            subjects.append(sub)
-            global_dict[sub] = []
-        im_id = '.'.join(f_split[:-1])
-        dicom_f = im_id + '.dcm'
-        dicom_filepath = os.path.join(dicom_path, dicom_f)
-        try:
-            xcf_filepath = os.path.join(xcf_path, xcf_f)
-            names, data = load_xcf(xcf_filepath)
-            layer_dict = {
-                name.lower(): d_i
-                for name, d_i in zip(names, data)
-                if '.dcm' not in name
-            }
-            dcm_data = dicom.dcmread(dicom_filepath)
-
-            #### Data preparation
-            # > Area segmentations
-            mask = np.max([
-                (i + 1) * binary_fill_holes(np.array(layer_dict[name])[..., -1] > 0)
-                for i, name in enumerate(layer_list[:-2])
-            ], axis=0)
-
-            #seg_filepath = os.path.join(out_path, im_id + '.png')
-            #skio.imsave(seg_filepath, mask.astype(np.uint8))
-            #dicom_outpath = os.path.join(out_path, dicom_f)
-            #copyfile(dicom_filepath, dicom_outpath)
-
-            global_dict[sub].append(
-                (im_id, dcm_data.pixel_array, mask)
-            )
-        except (IndexError, FileNotFoundError) as e:
-            print('ERROR loading', im_id, e)
-
-    np.random.seed(master_seed)
-    torch.manual_seed(master_seed)
-
-    classes = ['background'] + layer_names[:-2]
 
     # The experiments are run next. We capture some warnings related to
     # image loading to clean the debugging console.
@@ -521,7 +456,7 @@ def main():
                 pred_tcd = [
                     compute_tcd(
                         pred_i == 2, spacing, lr=axes_lr,
-                    n_iters=axes_iterations
+                        n_iters=axes_iterations
                     )[0] for pred_i in pred_list
                 ]
 
@@ -531,6 +466,39 @@ def main():
                     '|'
                 )
                 writer.writerow([im_id, gt_tcd] + [pred_i for pred_i in pred_tcd])
+
+
+def run_comparison(
+    global_dict, classes=None, layer_names=None, layer_list=None,
+    train_batch=1, test_batch = 1,
+    network_name='fcn-resnet50', display_name='FCN ResNet50',
+):
+    # Init
+    options = parse_inputs()
+    dicom_path = options['dicom_path']
+    out_path = options['out_path']
+    test_path = options['test_path']
+    weight_path = os.path.join(out_path, 'Weights')
+    metrics_path = os.path.join(out_path, 'Biometrics')
+    master_seed = options['master_seed']
+    n_epochs = options['epochs']
+    patience = options['patience']
+    axes_lr = options['axes_lr']
+    axes_iterations = options['axes_iterations']
+    lr = options['learning_rate']
+    if layer_names is None:
+        layer_names = [
+            'cavum', 'cerebellum', 'cisterna magna',
+            'nuchal fold', 'midline', 'sylvian'
+        ]
+    if layer_list is None:
+        layer_list = [
+            'cavum', 'cerebel', 'cisterna magna',
+            'plec nucal', 'midline', 'silvio'
+        ]
+    n_classes = len(layer_names) - 1
+
+    c = color_codes()
 
     experts = sorted(os.listdir(test_path))
 
@@ -550,9 +518,12 @@ def main():
     ]
 
     train_val_ids = [
-        sub_id for sub_id in global_dict.keys() if sub_id not in test_subs
+        sub_id for sub_id in global_dict.keys()
+        if sub_id not in test_subs
     ]
-    training_set, validation_set = train_val_split(train_val_ids, global_dict)
+    training_set, validation_set = train_val_split(
+        train_val_ids, global_dict
+    )
 
     np.random.seed(master_seed)
     torch.manual_seed(master_seed)
@@ -588,7 +559,9 @@ def main():
         validation_set, test_batch
     )
     model_path = os.path.join(
-        weight_path, '{:}-_s{:05d}_final.pt'.format(network_name, master_seed)
+        weight_path, '{:}-_s{:05d}_final.pt'.format(
+            network_name, master_seed
+        )
     )
 
     # For efficiency, we only run the code once. If the weights are
@@ -607,11 +580,11 @@ def main():
     header_info = ['image_id', 'tcd_' + network_name] + [
         'tcd_' + e.lower() for e in experts
     ] + ['cm_' + network_name] + [
-        'cm_' + e.lower() for e in experts
-    ] + ['nf_' + network_name] + [
-        'nf_' + e.lower() for e in experts
-    ]
-    print(header_info)
+                      'cm_' + e.lower() for e in experts
+                  ] + ['nf_' + network_name] + [
+                      'nf_' + e.lower() for e in experts
+                  ]
+
     print('Image ID    |   TCD    |   CM    |   NF    |')
 
     test_net.eval()
@@ -629,7 +602,9 @@ def main():
             dcm_data = dicom.dcmread(dicom_filepath)
             spacing = dcm_data[0x00280030].value
             im = np.expand_dims(
-                np.moveaxis(dcm_data.pixel_array, -1, 0).astype(np.float32),
+                np.moveaxis(
+                    dcm_data.pixel_array, -1, 0
+                ).astype(np.float32),
                 axis=0
             )
 
@@ -665,7 +640,7 @@ def main():
             plt.close()
 
             #### CSP biometrics
-            csp = mask == 1
+            csp = pred_mask == 1
             csp_com = np.mean(np.where(csp), axis=1)[::-1]
 
             vc2c = np.array(
@@ -674,8 +649,9 @@ def main():
             v_array = sample_arc(vc2c, pred_vcer, 200)
 
             #### Cisterna magna biometrics
+            cm = pred_mask == 3
             cm_segments = compute_section_distribution(
-                mask == 3, v_array, pred_cereb_c, spacing, plot=True
+                cm, v_array, pred_cereb_c, spacing, plot=True
             )
             ax = plt.gca()
             ax.axis("off")
@@ -689,8 +665,9 @@ def main():
             plt.close()
 
             #### Nuchal fold biometrics
+            nf = pred_mask == 4
             nf_segments = compute_section_distribution(
-                mask == 4, v_array, pred_cereb_c, spacing, plot=True
+                nf, v_array, pred_cereb_c, spacing, plot=True
             )
             ax = plt.gca()
             ax.axis("off")
@@ -786,6 +763,78 @@ def main():
             ]),
             '|'
         )
+
+
+def main():
+    # Init
+    options = parse_inputs()
+    xcf_path = options['xcf_path']
+    dicom_path = options['dicom_path']
+    out_path = options['out_path']
+    weight_path = os.path.join(out_path, 'Weights')
+    Path(weight_path).mkdir(parents=True, exist_ok=True)
+    metrics_path = os.path.join(out_path, 'Biometrics')
+    Path(metrics_path).mkdir(parents=True, exist_ok=True)
+    pred_path = os.path.join(out_path, 'Predictions')
+    Path(pred_path).mkdir(parents=True, exist_ok=True)
+
+    layer_list = [
+        'cavum', 'cerebel', 'cisterna magna',
+        'plec nucal', 'midline', 'silvio'
+    ]
+
+    xcf_files = sorted(
+        [f for f in os.listdir(xcf_path) if f.endswith('.xcf')],
+        key=lambda x: int(x.split('.')[0])
+    )
+    xcf_loop = tqdm(
+        enumerate(xcf_files), total=len(list(xcf_files)), leave=False,
+        desc='XCF and DCM file reading',
+    )
+
+    global_dict = {}
+    subjects = []
+
+    for i, xcf_f in xcf_loop:
+        f_split = xcf_f.split('.')
+        sub = f_split[0]
+        if sub not in subjects:
+            subjects.append(sub)
+            global_dict[sub] = []
+        im_id = '.'.join(f_split[:-1])
+        dicom_f = im_id + '.dcm'
+        dicom_filepath = os.path.join(dicom_path, dicom_f)
+        try:
+            xcf_filepath = os.path.join(xcf_path, xcf_f)
+            names, data = load_xcf(xcf_filepath)
+            layer_dict = {
+                name.lower(): d_i
+                for name, d_i in zip(names, data)
+                if '.dcm' not in name
+            }
+            dcm_data = dicom.dcmread(dicom_filepath)
+
+            #### Data preparation
+            # > Area segmentations
+            mask = np.max([
+                (i + 1) * binary_fill_holes(np.array(layer_dict[name])[..., -1] > 0)
+                for i, name in enumerate(layer_list[:-2])
+            ], axis=0)
+
+            #seg_filepath = os.path.join(out_path, im_id + '.png')
+            #skio.imsave(seg_filepath, mask.astype(np.uint8))
+            #dicom_outpath = os.path.join(out_path, dicom_f)
+            #copyfile(dicom_filepath, dicom_outpath)
+
+            global_dict[sub].append(
+                (im_id, dcm_data.pixel_array, mask)
+            )
+        except (IndexError, FileNotFoundError) as e:
+            print('ERROR loading', im_id, e)
+
+    # run_crossval(global_dict)
+
+    run_comparison(global_dict)
 
 
 if __name__ == '__main__':
