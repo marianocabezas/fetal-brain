@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 from utils import color_codes, load_xcf
 from datasets import FetalDataset
 from models import FCN_ResNet50, FCN_ResNet101
-from biometrics import compute_tcd, sample_arc, compute_section_distribution
+from biometrics import compute_tcd, sample_arc, compute_section_distribution, compute_csp_metrics
 
 
 def parse_inputs():
@@ -480,6 +480,7 @@ def run_comparison(
     test_path = options['test_path']
     weight_path = os.path.join(out_path, 'Weights')
     metrics_path = os.path.join(out_path, 'Biometrics')
+    pred_path = os.path.join(out_path, 'Predictions')
     master_seed = options['master_seed']
     n_epochs = options['epochs']
     patience = options['patience']
@@ -585,7 +586,7 @@ def run_comparison(
                       'nf_' + e.lower() for e in experts
                   ]
 
-    print('Image ID    |   TCD    |   CM    |   NF    |')
+    print('Image ID    |   TCD    |    CM    |    NF    | CSP vert | CSP hori |')
 
     test_net.eval()
     all_tcd_dict = {
@@ -622,6 +623,25 @@ def run_comparison(
             plt.figure(figsize=(20, 30))
             plt.imshow(dcm_data.pixel_array, cmap='gray')
             plt.imshow(
+                pred_mask, vmin=0, alpha=0.50,
+                cmap=ListedColormap(
+                    [[0, 0, 0, 0], 'lime', 'orange', 'magenta', 'blue'], name='foetal_all'
+                ),
+            )
+            plt.gca().set_title(
+                f'{display_name} segmentation (ID: {im_id})'
+            )
+            plt.gca().axis("off")
+            plt.savefig(
+                os.path.join(
+                    pred_path, f'{im_id}_{network_name}_seg.png'
+                )
+            )
+            plt.close()
+
+            plt.figure(figsize=(20, 30))
+            plt.imshow(dcm_data.pixel_array, cmap='gray')
+            plt.imshow(
                 pred_cerebellum, vmin=0, alpha=0.50,
                 cmap=ListedColormap(
                     [[0, 0, 0, 0], 'orange'], name='foetal_cereb'
@@ -634,7 +654,7 @@ def run_comparison(
             plt.gca().axis("off")
             plt.savefig(
                 os.path.join(
-                    metrics_path, f'{im_id}_{network_name}_cerebellum.png'
+                    pred_path, f'{im_id}_{network_name}_cerebellum.png'
                 )
             )
             plt.close()
@@ -648,6 +668,17 @@ def run_comparison(
             )
             v_array = sample_arc(vc2c, pred_vcer, 200)
 
+            csp_vert, csp_hor = compute_csp_metrics(
+                csp, pred_cereb_c, spacing, im_id, dcm_data.pixel_array
+            )
+            plt.gca().axis("off")
+            plt.savefig(
+                os.path.join(
+                    pred_path, f'{im_id}_{network_name}_csp.png'
+                )
+            )
+            plt.close()
+
             #### Cisterna magna biometrics
             cm = pred_mask == 3
             cm_segments = compute_section_distribution(
@@ -658,7 +689,7 @@ def run_comparison(
             plt.tight_layout()
             plt.savefig(
                 os.path.join(
-                    metrics_path,
+                    pred_path,
                     f'{im_id}_{network_name}_cm.png'
                 )
             )
@@ -674,8 +705,8 @@ def run_comparison(
             plt.tight_layout()
             plt.savefig(
                 os.path.join(
-                    '/home/mariano/Datasets/USFoetalSorted-Anna/Debugging',
-                    f'{im_id}_nf.png'
+                    pred_path,
+                    f'{im_id}_{network_name}_nf.png'
                 )
             )
             plt.close()
@@ -684,11 +715,15 @@ def run_comparison(
                 f'Image {im_id:>5} | {pred_tcd:6.3f}mm |',
                 f'{np.median(cm_segments):6.3f}mm |',
                 f'{np.median(nf_segments):6.3f}mm |',
+                f'{csp_vert:6.3f}mm |',
+                f'{csp_hor:6.3f}mm |',
             )
 
             e_tcds = []
             e_cm = []
             e_nf = []
+            e_csp_v = []
+            e_csp_h = []
             for expert in experts:
                 xcf_filepath = os.path.join(test_path, expert, tst_file)
                 names, data = load_xcf(xcf_filepath)
@@ -715,14 +750,23 @@ def run_comparison(
                     e_tcds.append(e_tcd)
                     all_tcd_dict[expert].append(e_tcd)
 
+                    e_csp_vert, e_csp_hor = compute_csp_metrics(
+                        csp, pred_cereb_c, spacing, im_id, dcm_data.pixel_array
+                    )
+                    plt.close()
+                    e_csp_v.append(e_csp_vert)
+                    e_csp_h.append(e_csp_hor)
+
                     e_cm_segments = compute_section_distribution(
                         e_mask == 3, v_array, pred_cereb_c, spacing
                     )
+                    plt.close()
                     e_cm.append(np.median(e_cm_segments))
 
                     e_nf_segments = compute_section_distribution(
                         e_mask == 4, v_array, pred_cereb_c, spacing
                     )
+                    plt.close()
                     e_nf.append(np.median(e_nf_segments))
 
                     plt.figure(figsize=(20, 30))
@@ -754,6 +798,10 @@ def run_comparison(
                     e_i for e_i in e_cm
                 ] + [np.median(nf_segments)] + [
                     e_i for e_i in e_nf
+                ] + [csp_vert] + [
+                    e_i for e_i in e_csp_v
+                ]  + [csp_hor] + [
+                    e_i for e_i in e_csp_h
                 ]
             )
         print(

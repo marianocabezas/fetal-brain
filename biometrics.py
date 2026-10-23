@@ -254,6 +254,78 @@ def compute_section_distribution(mask, v_array, center, spacing, plot=False):
     return segments
 
 
+def compute_csp_metrics(mask, cereb_c, spacing, im_id, image):
+    csp_com = np.mean(np.where(mask), axis=1)[::-1]
+
+    plt.figure(figsize=(40, 20))
+    ax = plt.gca()
+    ax.set_title('Segmentation (Subject {:>2})'.format(im_id))
+    ax.axis("off")
+    ax.imshow(image, cmap='gray')
+    cmap = ListedColormap([[0, 0, 0, 0], 'lime'], name='foetal_us')
+    ax.imshow(mask, cmap=cmap, vmin=0, alpha=0.50)
+    ax.scatter([csp_com[0]], [csp_com[1]], s=50, color='lime')
+    ax.scatter([cereb_c[0]], [cereb_c[1]], s=50, color='orange')
+
+    # Frame (axes) for the CSP based on the axis of symmetry of the brain
+    vc2c = np.array([csp_com[0] - cereb_c[0], csp_com[1] - cereb_c[1]])
+    len_vc2c = np.linalg.norm(vc2c)
+    vc2c_norm = vc2c / len_vc2c
+    vc2c_orto = np.array([vc2c[1], -vc2c[0]])
+    ax.plot(
+        [cereb_c[0], cereb_c[0] + vc2c[0]],
+        [cereb_c[1], cereb_c[1] + vc2c[1]],
+        color='cyan', alpha=0.3, linewidth=10
+    )
+
+    p0_csp, pf_csp = line_mask_intersections(cereb_c, vc2c, mask)
+    p0_csp = np.array(p0_csp)
+    pf_csp = np.array(pf_csp)
+    ax.scatter([p0_csp[0]], [p0_csp[1]], s=100, color='lime')
+    ax.scatter([pf_csp[0]], [pf_csp[1]], s=100, color='lime')
+
+    len_csp_pix = np.linalg.norm(pf_csp - p0_csp)
+    csp_hor = np.linalg.norm(pf_csp * spacing - p0_csp * spacing)
+    csp_vert = 0
+    max_vert = None
+
+    csp_frac = len_csp_pix / 4
+    sampling_points = [p0_csp] + [
+        p0_csp + 0.25 * d * vc2c_norm
+        for d in range(1, np.floor(len_csp_pix).astype(int) * 4)
+    ] + [pf_csp]
+    for pi in sampling_points:
+        ax.scatter([pi[0]], [pi[1]], s=10, color='red')
+        py0_csp, pyf_csp = line_mask_intersections(
+            pi, vc2c_orto, mask
+        )
+        if py0_csp is not None and pyf_csp is not None:
+            py0_csp = np.array(py0_csp)
+            pyf_csp = np.array(pyf_csp)
+            csp_vert_i = np.linalg.norm(pyf_csp * spacing - py0_csp * spacing)
+            if csp_vert_i > csp_vert:
+                csp_vert = csp_vert_i
+                max_vert = [py0_csp, pyf_csp]
+            ax.plot(
+                [py0_csp[0], pyf_csp[0]],
+                [py0_csp[1], pyf_csp[1]],
+                color='red', alpha=0.5, linewidth=5
+            )
+
+    ax.plot(
+        [p0_csp[0], pf_csp[0]],
+        [p0_csp[1], pf_csp[1]],
+        color='black', linewidth=5
+    )
+    ax.plot(
+        [max_vert[0][0], max_vert[1][0]],
+        [max_vert[0][1], max_vert[1][1]],
+        color='black', linewidth=5
+    )
+
+    return csp_vert, csp_hor
+
+
 def parse_inputs():
     parser = argparse.ArgumentParser(
         description='Check data related to the MAGE - MRI relationship'
@@ -333,6 +405,7 @@ def main():
             }
             dcm_data = dicom.dcmread(dicom_filepath)
             spacing = dcm_data[0x00280030].value
+            image = np.mean(dcm_data.pixel_array, axis=-1)
 
             #### Data preparation
             # > Area segmentations
@@ -351,8 +424,13 @@ def main():
             #### CSP biometrics
             csp = mask == 1
             csp_com = np.mean(np.where(csp), axis=1)[::-1]
+            csp_vert, csp_hor = compute_csp_metrics(csp, cereb_c, spacing, im_id, image)
 
+
+            # Frame (axes) for the CSP based on the axis of symmetry of the brain
             vc2c = np.array([csp_com[0] - cereb_c[0], csp_com[1] - cereb_c[1]])
+
+            # Intermediate computation for the posterior structures
             v_array = sample_arc(vc2c, vcer, 200)
 
             #### Cisterna magna biometrics
@@ -389,6 +467,8 @@ def main():
                 f'{im_id:<5} | [TCD: {tcd:6.3f} mm] |',
                 f'[Cisterna magna: {np.median(cm_segments):6.3f} mm] |',
                 f'[Nuchal fold: {np.median(nf_segments):6.3f} mm] |',
+                f'[CSP vertical: {csp_vert:6.3f} mm] |',
+                f'[CSP horizontal: {csp_hor:6.3f} mm] |',
                 f'{sorted(layer_dict.keys())}'
             )
 
