@@ -750,8 +750,9 @@ def run_comparison(
                     e_tcds.append(e_tcd)
                     all_tcd_dict[expert].append(e_tcd)
 
+                    e_csp = e_mask == 1
                     e_csp_vert, e_csp_hor = compute_csp_metrics(
-                        csp, pred_cereb_c, spacing, im_id, dcm_data.pixel_array
+                        e_csp, e_cereb_c, spacing, im_id, dcm_data.pixel_array
                     )
                     plt.close()
                     e_csp_v.append(e_csp_vert)
