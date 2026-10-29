@@ -31,6 +31,14 @@ from modelsYago import (
 
 # ── data processing ────────────────────────────────────────────────────────────
 
+# Known misspellings/aliases found in raw XCF layer names, mapped to the
+# canonical layer key used throughout this pipeline (layer_list, structures,
+# etc.). Add entries here if a new typo variant shows up in "All labels found".
+LAYER_NAME_ALIASES = {
+    'cerbel': 'cerebel',
+}
+
+
 def get_xcf_files(xcf_path):
     """Return sorted list of XCF filenames from xcf_path."""
     return sorted(
@@ -39,11 +47,36 @@ def get_xcf_files(xcf_path):
     )
 
 
-def build_segmentation(layer_dict, layer_list):
-    """Build a multi-class segmentation mask from a layer dictionary."""
+def normalize_layer_dict(layer_dict):
+    """
+    Rename known misspelled/alias layer keys (see LAYER_NAME_ALIASES) to their
+    canonical form, so a typo in one XCF file doesn't silently drop that
+    subject's structure from the mask. Raises if both the alias and the
+    canonical name are present at once (ambiguous — needs manual review).
+    """
+    for alias, canonical in LAYER_NAME_ALIASES.items():
+        if alias in layer_dict:
+            if canonical in layer_dict:
+                raise ValueError(
+                    "Both '{:}' and its canonical name '{:}' are present in "
+                    "the same file — ambiguous, please check the source XCF."
+                    .format(alias, canonical)
+                )
+            layer_dict[canonical] = layer_dict.pop(alias)
+    return layer_dict
+
+
+def build_segmentation(layer_dict, area_layers):
+    """
+    Build a multi-class segmentation mask from a layer dictionary.
+
+    area_layers must contain only the 'area' (segmentation-class) layer names,
+    in class order — line/curve layers (midline, sylvian, ...) must NOT be
+    included here, since they aren't segmentation masks.
+    """
     return np.max([
         (i + 1) * binary_fill_holes(np.array(layer_dict[name])[..., -1] > 0)
-        for i, name in enumerate(layer_list[:-2])
+        for i, name in enumerate(area_layers)
         if name in layer_dict
     ], axis=0)
 
@@ -105,7 +138,7 @@ def save_debug_plot(dcm_image, final_seg, subj_code, debug_path):
     plt.close(fig)
 
 
-def process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose=False):
+def process_subject(xcf_f, xcf_path, dicom_path, out_path, area_layers, verbose=False):
     """
     Process a single XCF/DICOM pair:
       - Load XCF layers and DICOM image
@@ -125,14 +158,17 @@ def process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose=F
             for name, d_i in zip(names, data)
             if '.dcm' not in name
         }
+        layer_dict = normalize_layer_dict(layer_dict)
+
         ds        = dicom.dcmread(os.path.join(dicom_path, dicom_f))
         dcm_image = np.mean(ds.pixel_array, axis=-1)
-        final_seg = build_segmentation(layer_dict, layer_list)
-        curves    = build_curves(layer_dict)
+        final_seg = build_segmentation(layer_dict, area_layers)
+        curves    = build_curves(layer_dict) if CURVE_STRUCTURES else None
 
         os.makedirs(out_path, exist_ok=True)
         skio.imsave(os.path.join(out_path, subj_code + '.png'), final_seg.astype(np.uint8))
-        np.save(os.path.join(out_path, subj_code + '_curves.npy'), curves)
+        if curves is not None:
+            np.save(os.path.join(out_path, subj_code + '_curves.npy'), curves)
         copyfile(os.path.join(dicom_path, dicom_f), os.path.join(out_path, dicom_f))
 
         if verbose:
@@ -166,7 +202,7 @@ def load_processed_subject(subj_code, out_path, active_spec=None, verbose=False)
         return None
 
 
-def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, active_spec=None, verbose=False):
+def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, area_layers, active_spec=None, verbose=False):
     """
     Run the fetal data sorting pipeline.
 
@@ -175,6 +211,9 @@ def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, a
     mode : str
         'full'      — process XCF/DICOM files from scratch and save outputs.
         'load_only' — read segmentation PNGs and DICOMs from out_path.
+    area_layers : list of str
+        Area (segmentation-class) layer names only, in class order. Used by
+        'full' mode when building masks from XCF layers.
     verbose : bool
         If True, save debug plots and print loading messages for every subject.
     """
@@ -187,11 +226,14 @@ def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, a
         subj_code = '.'.join(f_split[:-1])
 
         if mode == 'full':
-            result = process_subject(xcf_f, xcf_path, dicom_path, out_path, layer_list, verbose)
+            result = process_subject(xcf_f, xcf_path, dicom_path, out_path, area_layers, verbose)
             if result is not None:
                 subj_code, dcm_image, pixel_array, final_seg, curves, layer_keys = result
                 labels += layer_keys
-                global_dict.setdefault(sub, []).append((pixel_array, final_seg, curves))
+                if curves is not None:
+                    global_dict.setdefault(sub, []).append((pixel_array, final_seg, curves))
+                else:
+                    global_dict.setdefault(sub, []).append((pixel_array, final_seg))
         elif mode == 'load_only':
             result = load_processed_subject(subj_code, out_path, active_spec=active_spec, verbose=verbose)
             if result is not None:
@@ -215,15 +257,24 @@ def run_pipeline(mode, xcf_path, dicom_path, out_path, debug_path, layer_list, a
 
 if __name__ == '__main__':
 
-    xcf_path, dicom_path, debug_path = 'Anotacions 2026/', 'Cerebel_dicom_anonim/', 'outDebug/'
+    #xcf_path, dicom_path, debug_path = 'Anotacions 2026/', 'Cerebel_dicom_anonim/', 'outDebug/'
+    #processed_path = 'ProcessedData/'   # local — images, DICOMs, weights
+    #results_path   = '/home/yago/Yago Lab Dropbox/medicalImaging/experiments/'  # Dropbox — CSVs only
+
+    xcf_path, dicom_path, debug_path = 'Anotacions 2026AnnaPART/', 'Cerebel_dicom_anonim/', 'outDebug/'
     processed_path = 'ProcessedData/'   # local — images, DICOMs, weights
     results_path   = '/home/yago/Yago Lab Dropbox/medicalImaging/experiments/'  # Dropbox — CSVs only
-    mode = 'load_only'  # 'full'
+
+
+    mode = 'load_only' #'full'  # 'load_only' — set back to 'full' to regenerate masks after the
+                   # build_segmentation slicing fix (previous PNGs are missing the
+                   # last 2 area classes and must be rebuilt).
 
     # ── structure definitions ──────────────────────────────────────────────────
     # Each structure has:
     #   name  : display name used in results
-    #   layer : XCF layer key (lowercased)
+    #   layer : XCF layer key (lowercased, canonical — see LAYER_NAME_ALIASES
+    #           for known typo variants that get normalized automatically)
     #   type  : 'area' -> segmentation class / 'line' -> curve prediction
     #   degree: polynomial degree (only used for 'line' structures)
     structures = [
@@ -238,8 +289,8 @@ if __name__ == '__main__':
     area_structures = [s for s in structures if s['type'] == 'area']
     line_structures = [s for s in structures if s['type'] == 'line']
 
-    layer_list = [s['layer'] for s in area_structures] + [s['layer'] for s in line_structures]
-    classes    = ['background'] + [s['name'] for s in area_structures]
+    area_layers = [s['layer'] for s in area_structures]
+    classes     = ['background'] + [s['name'] for s in area_structures]
 
     # Build ACTIVE_SPEC from the active line structures (empty -> area-only mode)
     if line_structures:
@@ -253,25 +304,28 @@ if __name__ == '__main__':
         ]
     else:
         ACTIVE_SPEC = None
+        CURVE_STRUCTURES = []
 
-    global_dict = run_pipeline(mode, xcf_path, dicom_path, processed_path, debug_path, layer_list, active_spec=ACTIVE_SPEC, verbose=False)
+    global_dict = run_pipeline(mode, xcf_path, dicom_path, processed_path, debug_path, area_layers, active_spec=ACTIVE_SPEC, verbose=False)
 
+    # Each row: (net_name, display_name, network_factory, epochs)
+    # epochs is per-network so heavier models can train longer/shorter than others.
     networks = [
-        #('fcn-resnet101',     'FCN ResNet101',     partial(FCN_ResNet101,        lr=1e-4, pretrained=True)),
-        #('deeplab-resnet101', 'DeepLab ResNet101', partial(DeeplabV3_ResNet101,  lr=1e-4, pretrained=True)),
-        ('fcn-resnet50',      'FCN ResNet50',      partial(FCN_ResNet50,         lr=1e-4, pretrained=True)),
-        #('deeplab-resnet50',  'DeepLab ResNet50',  partial(DeeplabV3_ResNet50,   lr=1e-4, pretrained=True)),
-        #('deeplab-mobilenet', 'DeepLab MobileNet', partial(DeeplabV3_MobileNet,  lr=1e-4, pretrained=True)),
-        #('lraspp-mobilenet',  'LRASPP MobileNet',  partial(LRASPP_MobileNet,     lr=1e-4, pretrained=True)),
-        #('unet2d',            'UNet 2D',           partial(Unet2D,               lr=1e-4)),
-        #('segformer-b2',      'SegFormer B2',      partial(SegFormer,            lr=1e-4)),
-        #('segformer-b4',      'SegFormer B4',      partial(SegFormer, backbone='nvidia/mit-b4', lr=1e-4)),
-        ('segformer-b5',      'SegFormer B5',      partial(SegFormer, backbone='nvidia/mit-b5', lr=1e-4)),
+        ('fcn-resnet101',     'FCN ResNet101',     partial(FCN_ResNet101,        lr=1e-4, pretrained=True), 20),
+        ('deeplab-resnet101', 'DeepLab ResNet101', partial(DeeplabV3_ResNet101,  lr=1e-4, pretrained=True), 20),
+        ('fcn-resnet50',      'FCN ResNet50',      partial(FCN_ResNet50,         lr=1e-4, pretrained=True), 10),
+        ('deeplab-resnet50',  'DeepLab ResNet50',  partial(DeeplabV3_ResNet50,   lr=1e-4, pretrained=True), 20),
+        ('deeplab-mobilenet', 'DeepLab MobileNet', partial(DeeplabV3_MobileNet,  lr=1e-4, pretrained=True), 20),
+        ('lraspp-mobilenet',  'LRASPP MobileNet',  partial(LRASPP_MobileNet,     lr=1e-4, pretrained=True), 20),
+        ('unet2d',            'UNet 2D',           partial(Unet2D,               lr=1e-4), 20),
+        ('segformer-b2',      'SegFormer B2',      partial(SegFormer,            lr=1e-4), 20),
+        ('segformer-b4',      'SegFormer B4',      partial(SegFormer, backbone='nvidia/mit-b4', lr=1e-4), 30),
+        ('segformer-b5',      'SegFormer B5',      partial(SegFormer, backbone='nvidia/mit-b5', lr=1e-4), 30),
     ]
 
     all_results = []
     t_total_start = time()
-    for net_name, display_name, base_network_f in networks:
+    for net_name, display_name, base_network_f, n_epochs in networks:
         if ACTIVE_SPEC is not None:
             # wrap with curve prediction mouth
             def network_f(_base_f=base_network_f, _spec=ACTIVE_SPEC, **kwargs):
@@ -283,13 +337,13 @@ if __name__ == '__main__':
             def network_f(_base_f=base_network_f, **kwargs):
                 return _base_f(**kwargs)
 
-        print('[{:}] Starting {:}'.format(strftime("%d/%m/%Y - %H:%M:%S"), display_name))
+        print('[{:}] Starting {:} ({:d} epochs)'.format(strftime("%d/%m/%Y - %H:%M:%S"), display_name, n_epochs))
         t_start = time()
         exp = SegmentationExperiment(
             net_name, display_name, 'fetal us segmentation', network_f, global_dict,
             os.path.join(processed_path, 'Weights'),
             os.path.join(processed_path, 'Predictions', net_name),
-            classes, n_inputs=3, n_classes=len(classes), epochs = 30, patience=5,
+            classes, n_inputs=3, n_classes=len(classes), epochs=n_epochs, patience=5,
             train_batch=1, test_batch=1, n_seeds=5, verbose=1, save_plots=True,
         )
         _, _, results_df = exp.run(master_seed=42)

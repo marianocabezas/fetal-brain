@@ -141,6 +141,14 @@ class SegmentationExperiment:
                 card_pred_y = np.stack([np.sum(pred_y == lab) for lab in range(self.n_classes)])
                 card_y      = np.stack([np.sum(y == lab)      for lab in range(self.n_classes)])
                 dsc_k = intersection / (card_pred_y + card_y)
+
+                # check empty masks
+                zero_mask = (card_pred_y + card_y) == 0
+                if zero_mask.any():
+                    empty = [self.classes[i] for i in np.where(zero_mask)[0]]
+                    print(f"  sample {tst_i}: empty-both classes {empty}")
+
+
                 mosaic_dsc.append(np.nanmean(dsc_k))
                 mosaic_class_dsc.append(dsc_k.tolist())
 
